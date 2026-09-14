@@ -18,9 +18,11 @@ import streamlit as st
 import streamlit.components.v1 as components
 import pandas as pd
 from pypdf import PdfReader
+from datetime import datetime, date
 from backend.app.database import get_connection, init_db
 from backend.app.services.ai_service import generate_assessment_from_text, generate_practice_package
 from backend.app.services.srs_service import calculate_sm2
+from backend.app.services.recommendation_service import get_prioritized_topic
 
 
 init_db()
@@ -77,6 +79,38 @@ if selected_course_name == "+ Add New Course":
     active_course_id = None
 else:
     active_course_id = next(c["id"] for c in courses if c["name"] == selected_course_name)
+
+# Sidebar: Exam date tracker
+st.sidebar.subheader("📅 Upcoming Exam Date")
+current_exam = conn.execute(
+    "SELECT exam_name, exam_date FROM exams WHERE course_id = ? ORDER BY exam_date ASC LIMIT 1", 
+    (active_course_id,)
+).fetchone()
+
+if current_exam:
+    exam_name = current_exam["exam_name"]
+    exam_date = current_exam["exam_date"]
+    days_left = (datetime.strptime(exam_date, "%Y-%m-%d").date() - date.today()).days
+
+    if days_left >= 0:
+        st.sidebar.info(f"🎯 **{exam_name}**\n\n📅 {exam_date} ({days_left} days left)")
+    else:
+        st.sidebar.warning(f"⚠️ **{exam_name}** was on {exam_date}")
+else:
+    with st.sidebar.expander("➕ Add Upcoming Exam"):
+        exam_name_input = st.text_input("Exam Name", "Midterm Exam")
+        exam_date_input = st.date_input("Exam Date")
+        if st.button("Save Exam"):
+            if active_course_id and exam_name_input and exam_date_input:
+                conn.execute(
+                    "INSERT INTO exams (course_id, exam_name, exam_date) VALUES (?, ?, ?)",
+                    (active_course_id, exam_name_input, exam_date_input.strftime("%Y-%m-%d"))
+                )
+                conn.commit()
+                st.sidebar.success(f"Saved: {exam_name_input} on {exam_date_input}")
+                st.rerun()
+            else:
+                st.sidebar.error("Please select a course and provide both name and date.")
 
 # Switch course state and load persistent mastery if changed
 if active_course_id != st.session_state.current_course_id:
@@ -212,13 +246,24 @@ if st.session_state.quiz_submitted and st.session_state.mastery:
         st.bar_chart(df)
 
     with col2:
-        weakest_topic = min(st.session_state.mastery, key=st.session_state.mastery.get)
+        exam_date_str = current_exam["exam_date"] if current_exam else None
+
+        # Run recommendation engine with exam date and proximity check
+        weakest_topic, urgency_mult = get_prioritized_topic(st.session_state.mastery, exam_date_str)
         weakest_score = int(st.session_state.mastery[weakest_topic] * 100)
 
-        st.error(f"**Focus Area:** {weakest_topic}")
-        st.metric(label="Estimated Mastery", value=f"{weakest_score}%")
-        st.write(f"⏱️**Recommended:** 30 minutes of targeted review and practice on **{weakest_topic}**.")
+        # Dynamic UI feedback based on 'Upcoming Exam?' check
+        if current_exam and urgency_mult > 1.0:
+            st.error(f"🚨 **High-Priority Target:** {weakest_topic}")
+            st.caption(f"⚡ *Boosted due to upcoming {current_exam['exam_name']} ({days_left} days remaining)*")
+            recommended_mins = 45 if days_left <= 3 else 30
+        else:
+            st.error(f"**Focus Area:** {weakest_topic}")
+            recommended_mins = 20
 
+
+        st.metric(label="Current Mastery", value=f"{weakest_score}%")
+        st.write(f"⏱️ **Recommended Study Time:** {recommended_mins} minutes for targeted practice on **{weakest_topic}**.")
         if st.button(f"🎯 Launch Practice Hub for {weakest_topic}"):
             with st.spinner(f"Generating drills & flashcards for {weakest_topic}..."):
                 st.session_state.practice_package = generate_practice_package(
