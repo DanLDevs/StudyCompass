@@ -59,5 +59,32 @@ def init_db():
         ON topic_mastery (course_id, topic_name)
     """)
 
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS flashcards (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            course_id INTEGER NOT NULL,
+            topic_name TEXT NOT NULL,
+            front TEXT NOT NULL,
+            back TEXT NOT NULL,
+            interval INTEGER DEFAULT 0, -- in days
+            repetitions INTEGER DEFAULT 0,
+            ease_factor REAL DEFAULT 2.5,
+            due_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(course_id, front),
+            FOREIGN KEY (course_id) REFERENCES courses (id) ON DELETE CASCADE
+        );
+    """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS exams (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            course_id INTEGER NOT NULL,
+            exam_name TEXT NOT NULL,
+            exam_date DATE NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (course_id) REFERENCES courses (id) ON DELETE CASCADE
+        );
+    """)
+
     conn.commit()
     conn.close()

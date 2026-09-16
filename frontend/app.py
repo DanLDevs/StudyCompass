@@ -1,6 +1,7 @@
 # Streamlit app
 import sys
 from pathlib import Path
+import random
 
 # Add the project root ('Study Compass') to Python's sys.path
 ROOT_DIR = Path(__file__).resolve().parent.parent
@@ -14,10 +15,14 @@ if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
 import streamlit as st
+import streamlit.components.v1 as components
 import pandas as pd
 from pypdf import PdfReader
+from datetime import datetime, date
 from backend.app.database import get_connection, init_db
-from backend.app.services.ai_service import generate_assessment_from_text, generate_practice_for_topic
+from backend.app.services.ai_service import generate_assessment_from_text, generate_practice_package
+from backend.app.services.srs_service import calculate_sm2
+from backend.app.services.recommendation_service import get_prioritized_topic
 
 
 init_db()
@@ -38,11 +43,18 @@ if "quiz_submitted" not in st.session_state:
 if "course_text" not in st.session_state:
     st.session_state.course_text = ""  # Store uploaded course material text
 
-if "practice_questions" not in st.session_state:
-    st.session_state.practice_questions = None  # Store generated practice questions for a topic
+if "practice_package" not in st.session_state:
+    st.session_state.practice_package = None  # Store generated practice package for the topic
 
-if "practice_topic" not in st.session_state:
-    st.session_state.practice_topic = ""
+if "card_idx" not in st.session_state:
+    st.session_state.card_idx = 0  # Index for flashcard navigation
+
+if "card_flipped" not in st.session_state:
+    st.session_state.card_flipped = False  # Flashcard flip state
+
+if "scrambled_defs" not in st.session_state:
+    st.session_state.scrambled_defs = []  # Store scrambled definitions for term matching
+
 if "current_course_id" not in st.session_state:
     st.session_state.current_course_id = None  # Store the currently selected course ID
 
@@ -68,11 +80,43 @@ if selected_course_name == "+ Add New Course":
 else:
     active_course_id = next(c["id"] for c in courses if c["name"] == selected_course_name)
 
+# Sidebar: Exam date tracker
+st.sidebar.subheader("📅 Upcoming Exam Date")
+current_exam = conn.execute(
+    "SELECT exam_name, exam_date FROM exams WHERE course_id = ? ORDER BY exam_date ASC LIMIT 1", 
+    (active_course_id,)
+).fetchone()
+
+if current_exam:
+    exam_name = current_exam["exam_name"]
+    exam_date = current_exam["exam_date"]
+    days_left = (datetime.strptime(exam_date, "%Y-%m-%d").date() - date.today()).days
+
+    if days_left >= 0:
+        st.sidebar.info(f"🎯 **{exam_name}**\n\n📅 {exam_date} ({days_left} days left)")
+    else:
+        st.sidebar.warning(f"⚠️ **{exam_name}** was on {exam_date}")
+else:
+    with st.sidebar.expander("➕ Add Upcoming Exam"):
+        exam_name_input = st.text_input("Exam Name", "Midterm Exam")
+        exam_date_input = st.date_input("Exam Date")
+        if st.button("Save Exam"):
+            if active_course_id and exam_name_input and exam_date_input:
+                conn.execute(
+                    "INSERT INTO exams (course_id, exam_name, exam_date) VALUES (?, ?, ?)",
+                    (active_course_id, exam_name_input, exam_date_input.strftime("%Y-%m-%d"))
+                )
+                conn.commit()
+                st.sidebar.success(f"Saved: {exam_name_input} on {exam_date_input}")
+                st.rerun()
+            else:
+                st.sidebar.error("Please select a course and provide both name and date.")
+
 # Switch course state and load persistent mastery if changed
 if active_course_id != st.session_state.current_course_id:
     st.session_state.current_course_id = active_course_id
     st.session_state.assessment = None
-    st.session_state.practice_questions = None
+    st.session_state.practice_package = None
 
     if active_course_id:
         rows = conn.execute(
@@ -86,19 +130,19 @@ if active_course_id != st.session_state.current_course_id:
         st.session_state.quiz_submitted = False
 
 # --- Section 1: Upload Course Material ---
-st.subheader("1. Upload Lecture Notes")
+st.subheader("1. Upload Study Material")
 
 if not active_course_id:
     st.info("👈 Please select or create an active course in the sidebar to begin.")
     st.stop()
 
-uploaded_file = st.file_uploader("Upload course notes (.txt or .pdf)", type=["txt", "pdf"])
+uploaded_file = st.file_uploader("Upload study material (.txt or .pdf)", type=["txt", "pdf"])
 
-# Toggle button to verify note correctness
+# Toggle button to verify study material correctness
 check_errors = st.toggle(
-    "🔍 Fact-check notes for errors or misconceptions", 
+    "🔍 Check study material for errors or misconceptions", 
     value=True,
-    help="When enabled, Gemini verifies whether your uploaded notes contain errors and provides feedback."
+    help="When enabled, Gemini checks whether your uploaded study material contains errors and provides feedback."
 )
 
 if uploaded_file and st.button("Generate Diagnostic Quiz"):
@@ -113,7 +157,7 @@ if uploaded_file and st.button("Generate Diagnostic Quiz"):
 
         st.session_state.course_text = text[:4000]  # Limit to first 4000 chars for LLM
 
-        # Store the uploaded notes in the database for future reference
+        # Store the uploaded study material in the database for future reference
         conn.execute(
             "INSERT INTO documents (course_id, filename, extracted_text) VALUES (?, ?, ?)",
             (active_course_id, uploaded_file.name, st.session_state.course_text)
@@ -135,12 +179,12 @@ if uploaded_file and st.button("Generate Diagnostic Quiz"):
 # -- Feedback Detection Popup ---
 if st.session_state.assessment: 
     if st.session_state.assessment.detected_errors:
-        st.warning("The AI detected potential factual errors or misconceptions in your uploaded notes:")
+        st.warning("The AI detected potential factual errors or misconceptions in your uploaded study material:")
         for err in st.session_state.assessment.detected_errors:
             st.markdown(f"* **In Your Notes:** *\"{err.claimed_concept}\"*")
             st.markdown(f"  * **Correction:** {err.correction} `[{err.severity}]`")
     elif check_errors:
-        st.success("✅ **Notes Verified:** No obvious factual errors or contradictions were detected.")
+        st.success("✅ **Study Material Verified:** No obvious factual errors or contradictions were detected.")
 
 # --- Section 2: Diagnostic Assessment ---
 if st.session_state.assessment and not st.session_state.quiz_submitted:
@@ -202,65 +246,218 @@ if st.session_state.quiz_submitted and st.session_state.mastery:
         st.bar_chart(df)
 
     with col2:
-        weakest_topic = min(st.session_state.mastery, key=st.session_state.mastery.get)
+        exam_date_str = current_exam["exam_date"] if current_exam else None
+
+        # Run recommendation engine with exam date and proximity check
+        weakest_topic, urgency_mult = get_prioritized_topic(st.session_state.mastery, exam_date_str)
         weakest_score = int(st.session_state.mastery[weakest_topic] * 100)
 
-        st.error(f"**Focus Area:** {weakest_topic}")
-        st.metric(label="Estimated Mastery", value=f"{weakest_score}%")
-        st.write(f"⏱️**Recommended:** 30 minutes of targeted review and practice on **{weakest_topic}**.")
+        # Dynamic UI feedback based on 'Upcoming Exam?' check
+        if current_exam and urgency_mult > 1.0:
+            st.error(f"🚨 **High-Priority Target:** {weakest_topic}")
+            st.caption(f"⚡ *Boosted due to upcoming {current_exam['exam_name']} ({days_left} days remaining)*")
+            recommended_mins = 45 if days_left <= 3 else 30
+        else:
+            st.error(f"**Focus Area:** {weakest_topic}")
+            recommended_mins = 20
 
-        if st.button(f"🎯 Start Practice on {weakest_topic}"):
-            with st.spinner(f"Generating practice questions for {weakest_topic}..."):
-                st.session_state.practice_topic = weakest_topic
-                try:
-                    st.session_state.practice_questions = generate_practice_for_topic(
-                        weakest_topic, st.session_state.course_text
-                    )
-                except Exception as error:
-                    st.error(
-                        "The AI service is temporarily unavailable. "
-                        f"Please try again shortly. ({error})"
-                    )
-                    st.stop()
+
+        st.metric(label="Current Mastery", value=f"{weakest_score}%")
+        st.write(f"⏱️ **Recommended Study Time:** {recommended_mins} minutes for targeted practice on **{weakest_topic}**.")
+        if st.button(f"🎯 Launch Practice Hub for {weakest_topic}"):
+            with st.spinner(f"Generating drills & flashcards for {weakest_topic}..."):
+                st.session_state.practice_package = generate_practice_package(
+                    weakest_topic, st.session_state.course_text
+                )
+                st.session_state.card_idx = 0
+                st.session_state.card_flipped = False
+
+                # Scramble definitions once upon generation
+                defs = [p.definition for p in st.session_state.practice_package.matching_pairs]
+                random.shuffle(defs)
+                st.session_state.scrambled_defs = defs            
                 st.rerun()
 
 # --- Section 4: Target Practice & Reassessment ---
-if st.session_state.practice_questions:
+if st.session_state.practice_package:
+    pkg = st.session_state.practice_package
     st.divider()
-    st.subheader(f"4. Target Practice: {st.session_state.practice_topic}")
+    st.subheader(f"🛠️ Practice Hub: {pkg.topic}")
 
-    with st.form("practice_form"):
-        practice_answers = {}
-        for p_idx, pq in enumerate(st.session_state.practice_questions):
-            st.write(f"**Practice Q{p_idx + 1}: {pq.question_text}**")
-            practice_answers[p_idx] = st.radio(
-                f"Select option for Q{p_idx + 1}", 
-                pq.options, 
-                key=f"practice_q{p_idx}"
+    tab_mcq, tab_cards, tab_matching = st.tabs([
+        "📝 Target Quiz",
+        "🎴 Flashcards",
+        "🧩 Term Matching"
+    ])
+
+    # Targeted Multiple Choice Quiz Reassessment
+    with tab_mcq:
+        with st.form("mcq_practice_form"):
+            answers = {}
+            for idx, q in enumerate(pkg.multiple_choice):
+                st.write(f"**Q{idx + 1}: {q.question_text}**")
+                answers[idx] = st.radio(f"Options for Q{idx+1}", q.options, key=f"drill_q{idx}")
+
+            if st.form_submit_button("Submit Quiz & Update Mastery"):
+                correct = sum(
+                    1 for idx, q in enumerate(pkg.multiple_choice)
+                    if q.options.index(answers[idx]) == q.correct_option_index
+                )
+                score = correct / len(pkg.multiple_choice)
+                prev = st.session_state.mastery.get(pkg.topic, 0.5)
+                new_score = round((prev * 0.4) + (score * 0.6), 2)
+
+                # Persist the updated mastery score to the database
+                conn.execute("""
+                    INSERT INTO topic_mastery (course_id, topic_name, mastery_score)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(course_id, topic_name) DO UPDATE SET mastery_score = excluded.mastery_score
+                """, (active_course_id, pkg.topic, new_score))
+                conn.commit()
+
+                st.session_state.mastery[pkg.topic] = new_score
+                st.toast(f"Mastery on {pkg.topic} recalibrated to {int(new_score * 100)}%!", icon="📈")
+                st.rerun()
+
+    def keyboard_shortcut_listener():
+        components.html("""
+            <script>
+            const doc = window.parent.document;
+            doc.addEventListener('keydown', function(e) {
+                // Ignore if user is typing in a real text input
+                if (['INPUT', 'TEXTAREA'].includes(doc.activeElement.tagName)) return;
+                
+                let buttonText = null;
+                if (e.code === 'Space') {
+                    buttonText = 'Flip Card';
+                } else if (e.key === '1') {
+                    buttonText = '1 - Again';
+                } else if (e.key === '2') {
+                    buttonText = '2 - Hard';
+                } else if (e.key === '3') {
+                    buttonText = '3 - Good';
+                } else if (e.key === '4') {
+                    buttonText = '4 - Easy';
+                }
+
+                if (buttonText) {
+                    const buttons = Array.from(doc.querySelectorAll('button'));
+                    const target = buttons.find(b => b.innerText.includes(buttonText));
+                    if (target) {
+                        target.click();
+                        e.preventDefault();
+                    }
+                }
+            });
+            </script>
+        """, height=0, width=0)
+
+    # Anki-Style Flashcards with SM-2 Spaced Repetition
+    with tab_cards:
+        cards = pkg.flashcards
+        keyboard_shortcut_listener()  # Enable keyboard shortcuts for flashcard navigation
+
+        # Queue tracking in session state
+        if "srs_queue" not in st.session_state or not st.session_state.srs_queue:
+            st.session_state.srs_queue = list(range(len(cards)))
+            st.session_state.card_flipped = False
+
+        if not st.session_state.srs_queue:
+            st.balloons()
+            st.success("🎉 You have reviewed all cards for this session!")
+            if st.button("Restart Review Session"):
+                st.session_state.srs_queue = list(range(len(cards)))
+                st.session_state.card_flipped = False
+                st.rerun()
+        else:
+            current_card_idx = st.session_state.srs_queue[0]
+            card = cards[current_card_idx]
+        
+
+        st.caption(f"Remaining in queue: **{len(st.session_state.srs_queue)}** | Shortcuts: [Space] Flip | [1] Again | [2] Hard | [3] Good | [4] Easy")
+
+        # Flashcard Container
+        with st.container(border=True):
+            if not st.session_state.card_flipped:
+                st.markdown(f"### ❓ {card.front}")
+                st.caption("Press **Space** or click below to reveal answer.")
+                if st.button("🔄 Flip Card (Space)", use_container_width=True):
+                    st.session_state.card_flipped = True
+                    st.rerun()
+            else:
+                st.markdown(f"### 💡 {card.back}")
+                st.caption(f"Term: {card.front}")
+                st.divider()
+
+                # Anki buttons: 1 - Again, 2 - Hard, 3 - Good, 4 - Easy
+                col1, col2, col3, col4 = st.columns(4)
+
+                def record_grade(grade):
+                    # Fetch current card stats from DB
+                    row = conn.execute(
+                        "SELECT repetitions, ease_factor, interval FROM flashcards WHERE course_id = ? AND front = ?",
+                        (active_course_id, card.front)
+                    ).fetchone()
+
+                    reps = row["repetitions"] if row else 0
+                    ef = row["ease_factor"] if row else 2.5
+                    interval = row["interval"] if row else 0
+
+                    # Calculate next SM-2 interval 
+                    new_reps, new_ef, new_interval, next_due = calculate_sm2(grade, reps, ef, interval)
+
+                    # Persist to SQLite
+                    conn.execute("""
+                        INSERT INTO flashcards (course_id, topic_name, front, back, interval, repetitions, ease_factor, due_date)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(course_id, front) DO UPDATE SET
+                            interval = excluded.interval,
+                            repetitions = excluded.repetitions,
+                            ease_factor = excluded.ease_factor,
+                            due_date = excluded.due_date
+                    """, (active_course_id, pkg.topic, card.front, card.back, new_interval, new_reps, new_ef, next_due))
+                    conn.commit()
+
+                    # Anki queue behavior:
+                    # If "Again" (1), push card to the end of the current session queue
+                    finished_idx = st.session_state.srs_queue.pop(0)
+                    if grade == 1:
+                        st.session_state.srs_queue.append(finished_idx)  # Re-add to end of queue
+
+                    st.session_state.card_flipped = False
+                    st.rerun()
+
+                with col1:
+                    if st.button("1 - Again", use_container_width=True):
+                        record_grade(1)
+                with col2:
+                    if st.button("2 - Hard", use_container_width=True):
+                        record_grade(2)
+                with col3:
+                    if st.button("3 - Good", use_container_width=True):
+                        record_grade(3)
+                with col4:
+                    if st.button("4 - Easy", use_container_width=True):
+                        record_grade(4)
+
+    # Term Matching
+    with tab_matching:
+        pairs = pkg.matching_pairs
+        st.write("Match each term to its correct definition:")
+
+        # Scramble definitions for the drop-down selector
+        selected_matches = {}
+        for p in pairs:
+            selected_matches[p.term] = st.selectbox(
+                f"**{p.term}**",
+                options=["Select a definition..."] + st.session_state.scrambled_defs,
+                key=f"match_{p.term}"
             )
 
-        if st.form_submit_button("Submit Practice & Reassess"):
-            correct_count = 0
-            for p_idx, pq in enumerate(st.session_state.practice_questions):
-                selected_idx = pq.options.index(practice_answers[p_idx])
-                if selected_idx == pq.correct_option_index:
-                    correct_count += 1
+        if st.button("Check Matches"):
+            correct_matches = sum(1 for p in pairs if selected_matches[p.term] == p.definition)
 
-            # Reassess mastery for the practiced topic
-            practice_score = correct_count / len(st.session_state.practice_questions)
-            prev_mastery = st.session_state.mastery[st.session_state.practice_topic]
-            new_mastery = round((prev_mastery * 0.4) + (practice_score * 0.6), 2)  # Weighted update
-
-            # Persist the updated mastery score to the database
-            conn.execute("""
-                INSERT INTO topic_mastery (course_id, topic_name, mastery_score)
-                VALUES (?, ?, ?)
-                ON CONFLICT(course_id, topic_name) DO UPDATE SET mastery_score = excluded.mastery_score
-                """, (active_course_id, st.session_state.practice_topic, new_mastery)
-            )
-            conn.commit()
-
-            st.session_state.mastery[st.session_state.practice_topic] = new_mastery
-            st.session_state.practice_questions = None  # Clear practice questions
-            st.success(f"Mastery on {st.session_state.practice_topic} updated to {int(prev_mastery * 100)}% to {int(new_mastery * 100)}%!")
-            st.rerun()
+            if correct_matches == len(pairs):
+                st.success(f"🎉 Perfect Score! All {len(pairs)} matches are correct.")
+            else:
+                st.warning(f"You got {correct_matches} out of {len(pairs)} correct. Review your notes and try again!")
