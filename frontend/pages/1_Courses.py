@@ -2,13 +2,11 @@ import sys
 from pathlib import Path
 import random
 
-# Add the project root ('Study Compass') to Python's sys.path
-ROOT_DIR = Path(__file__).resolve().parent.parent
+# Resolve project root ('Study Compass') from 'frontend/pages/'
+ROOT_DIR = Path(__file__).resolve().parent.parent.parent
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-# Add the backend package root so imports work when Streamlit runs this file
-# directly from the frontend directory.
 BACKEND_DIR = ROOT_DIR / "backend"
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
@@ -19,7 +17,7 @@ import pandas as pd
 from pypdf import PdfReader
 
 from backend.app.database import get_connection, init_db
-from backend.app.services.ai_service import generate_assessment_from_text, generate_practice_package
+from backend.app.services.ai_service import generate_assessment_from_text, generate_practice_package, apply_note_corrections
 from backend.app.services.srs_service import calculate_sm2
 from backend.app.services.recommendation_service import get_prioritized_topic
 
@@ -29,10 +27,23 @@ conn = get_connection()
 st.set_page_config(page_title="StudyCompass | Courses", layout="wide")
 
 # Session state setup
-for key in ["mastery", "assessment", "quiz_submitted", "course_text", "practice_package", 
-            "card_flipped", "scrambled_defs", "current_course_id", "srs_queue", "srs_completed"]:
+session_defaults = {
+    "mastery": {},
+    "assessment": None,
+    "quiz_submitted": False,
+    "course_text": "",
+    "practice_package": None,
+    "card_flipped": False,
+    "scrambled_defs": [],
+    "current_course_id": None,
+    "srs_queue": None,
+    "srs_completed": False,
+    "pending_assessment": None,
+    "reviewing_corrections": False
+}
+for key, default in session_defaults.items():
     if key not in st.session_state:
-        st.session_state[key] = {} if key == "mastery" else None
+        st.session_state[key] = default
 
 st.title("📚 Courses Workspace")
 
@@ -52,9 +63,12 @@ if selected_course_name == "+ Add New Course":
 else:
     active_course_id = next(c["id"] for c in courses if c["name"] == selected_course_name)
 
+# Course switch detection and session state reset
 if active_course_id != st.session_state.current_course_id:
     st.session_state.current_course_id = active_course_id
     st.session_state.assessment = None
+    st.session_state.pending_assessment = None
+    st.session_state.reviewing_corrections = False
     st.session_state.practice_package = None
     st.session_state.srs_queue = None
     st.session_state.srs_completed = None
@@ -73,46 +87,137 @@ if not active_course_id:
     st.info("👈 Please select or create an active course in the sidebar to begin.")
     st.stop()
 
+# Sidebar Course Deletion and Management
+with st.sidebar.expander("⚙️ Manage Course"):
+    # State tracking for confirmation
+    delete_key = f"confirm_delete_course_{active_course_id}"
+    if delete_key not in st.session_state:
+        st.session_state[delete_key] = False
+    if not st.session_state[delete_key]:
+        if st.button("🗑️ Delete Course", type="secondary", use_container_width=True):
+            st.session_state[delete_key] = True
+            st.rerun()
+    else:
+        st.error(f"Permanently delete **{selected_course_name}** and all its data? This action cannot be undone.")
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("Yes, Delete", type="primary", use_container_width=True):
+                # Delete from database (foreign keys cascade)
+                conn.execute("DELETE FROM courses WHERE id = ?", (active_course_id,))
+                conn.commit()
+                # Reset session state and rerun
+                st.session_state[delete_key] = False
+                st.session_state.current_course_id = None
+                st.session_state.mastery = {}
+                st.session_state.assessment = None
+                st.session_state.reviewing_corrections = False
+                st.session_state.practice_package = None
+                st.rerun()
+        with col2:
+            if st.button("Cancel", use_container_width=True):
+                st.session_state[delete_key] = False
+                st.rerun()
+
 # Material Ingestion & Fact Checking
 st.subheader("1. Upload Study Material")
 uploaded_file = st.file_uploader("Upload study material (.txt or .pdf)", type=["txt", "pdf"])
 check_errors = st.toggle("🔍 Fact-check notes for errors", value=True)
 
-if uploaded_file and st.button("Generate Diagnostic Quiz"):
-    with st.spinner("Analyzing material and generating questions..."):
-            text = ""
-            if uploaded_file.name.endswith(".pdf"):
-                reader = PdfReader(uploaded_file)
-                for page in reader.pages:
-                    text += page.extract_text() or ""
-            else:
-                text = uploaded_file.read().decode("utf-8")
-    
-            st.session_state.course_text = text[:4000]  # Limit to first 4000 chars for LLM
-    
-            # Store the uploaded study material in the database for future reference
-            conn.execute(
-                "INSERT INTO documents (course_id, filename, extracted_text) VALUES (?, ?, ?)",
-                (active_course_id, uploaded_file.name, st.session_state.course_text)
+if uploaded_file and st.button("Analyze Notes & Prepare Assessment"):
+    with st.spinner("Parsing notes and checking for misconceptions..."):
+        text = ""
+        if uploaded_file.name.endswith(".pdf"):
+            reader = PdfReader(uploaded_file)
+            for page in reader.pages:
+                text += page.extract_text() or ""
+        else:
+            text = uploaded_file.read().decode("utf-8")
+
+        st.session_state.course_text = text[:4000]  # Limit to first 4000 chars for LLM
+
+        # Initial Document Save
+        conn.execute(
+            "INSERT INTO documents (course_id, filename, extracted_text) VALUES (?, ?, ?)",
+            (active_course_id, uploaded_file.name, st.session_state.course_text)
+        )
+        conn.commit()
+
+        try:
+            # Generate assessment and error analysis
+            assessment = generate_assessment_from_text(
+                st.session_state.course_text, check_correctness=check_errors
             )
-            conn.commit()
-    
-            st.session_state.assessment = generate_assessment_from_text(
-                st.session_state.course_text, check_correctness=check_errors)
-            st.session_state.mastery = {}
-            st.session_state.quiz_submitted = False
-            st.session_state.practice_questions = None
-            st.rerun()  # Refresh the app to show the quiz
+        except Exception as e:
+            st.error(f"AI service temporarily unavailable. Please try again later. ({e})")
+            st.stop()
 
-# Verification Warnings
-if st.session_state.assessment and st.session_state.assessment.detected_errors:
-    st.warning("⚠️ **Misconceptions Detected in Source Material:")
-    for err in st.session_state.assessment.detected_errors:
-        st.markdown(f"* **In Your Notes:** *\"{err.claimed_concept}\"*")
-        st.markdown(f"  * **Correction:** {err.correction} `[{err.severity}]`")
+        # Decision Gate: Check for misconceptions
+        if check_errors and assessment.detected_errors:
+            st.session_state.pending_assessment = assessment
+            st.session_state.reviewing_corrections = True
+            st.session_state.assessment = None
+        else:
+            # Clean pass: proceed imediately
+            st.session_state.assessment = assessment
+            st.session_state.pending_assessment = None
+            st.session_state.reviewing_corrections = False
 
+        st.session_state.mastery = {}
+        st.session_state.quiz_submitted = False
+        st.session_state.practice_package = None
+        st.rerun()
+
+# Interactive Decision Gate for Detected Misconceptions
+if st.session_state.reviewing_corrections and st.session_state.pending_assessment:
+    st.warning("⚠️ **Detected Misconceptions in Uploaded Notes:**")
+    st.write("Gemini detected potential factual errors in your uploaded notes. How would you like to proceed?")
+
+    # Display detected errors with corrections
+    for e in st.session_state.pending_assessment.detected_errors:
+        with st.container(border=True):
+            st.markdown(f"**Found in Notes:** *\"{e.claimed_concept}\"*")
+            st.markdown(f"💡 **Suggested Fix:** {e.correction} `[{e.severity}]`")
+
+    gate_col1, gate_col2 = st.columns(2)
+
+    with gate_col1:
+        if st.button("✨ Apply Corrections & Update Notes", type="primary", use_container_width=True):
+            with st.spinner("Updating notes and regenerating assessment..."):
+                # Rewrite notes with corrections applied
+                corrected_text = apply_note_corrections(
+                    st.session_state.course_text,
+                    st.session_state.pending_assessment.detected_errors
+                )
+                st.session_state.course_text = corrected_text
+
+                # Update the database document with corrected text
+                conn.execute("""
+                    UPDATE documents
+                    SET extracted_text = ?
+                    WHERE course_id = ? AND id = (
+                        SELECT id FROM documents WHERE course_id = ? ORDER BY uploaded_at DESC LIMIT 1
+                    )
+                """, (corrected_text, active_course_id, active_course_id))
+                conn.commit()
+
+                # Regenerate assessment based on accurate material
+                st.session_state.assessment = generate_assessment_from_text(
+                    corrected_text, check_correctness=False
+                )
+                st.session_state.reviewing_corrections = False
+                st.session_state.pending_assessment = None
+                st.toast("Notes updated with correction!", icon="✅")
+                st.rerun()
+
+    with gate_col2:
+        if st.button("Keep Notes As-Is & Proceed", type="secondary", use_container_width=True):
+            st.session_state.assessment = st.session_state.pending_assessment
+            st.session_state.reviewing_corrections = False
+            st.session_state.pending_assessment = None
+            st.rerun()  
+        
 # Diagnostic Assessment
-if st.session_state.assessment and not st.session_state.quiz_submitted:
+if st.session_state.assessment and not st.session_state.quiz_submitted and not st.session_state.reviewing_corrections:
     st.header("2. Diagnostic Assessment")
     with st.form("quiz_form"):
         user_answers = {}
@@ -121,7 +226,8 @@ if st.session_state.assessment and not st.session_state.quiz_submitted:
             user_answers[idx] = st.radio(
                 f"Options for Q{idx + 1}", 
                 q.options, 
-                key=f"q{idx}"
+                key=f"q{idx}",
+                label_visibility="collapsed"
             )
 
         if st.form_submit_button("Submit Answers"):
@@ -219,7 +325,7 @@ if st.session_state.practice_package:
             answers = {}
             for idx, q in enumerate(pkg.multiple_choice):
                 st.write(f"**Q{idx + 1}: {q.question_text}**")
-                answers[idx] = st.radio(f"Options for Q{idx+1}", q.options, key=f"drill_q{idx}")
+                answers[idx] = st.radio(f"Options for Q{idx+1}", q.options, key=f"drill_q{idx}", label_visibility="collapsed")
 
             if st.form_submit_button("Submit Quiz & Update Mastery"):
                 correct = sum(

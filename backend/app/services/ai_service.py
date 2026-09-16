@@ -108,3 +108,29 @@ def generate_practice_package(topic: str, course_text: str) -> TopicPracticePack
         },
     )
     return TopicPracticePackage.model_validate_json(response.text)
+
+def apply_note_corrections(course_text: str, detected_errors: list) -> str:
+    # Rewrite the course text to correct any detected inaccuracies while preserving original working and structure.
+    errors_summary = "\n".join([
+        f"- Inaccuracy: '{e.claimed_concept}' | Correction: '{e.correction}'"
+        for e in detected_errors
+    ])
+
+    prompt = f"""
+    Original Study Notes:
+    \"\"\"{course_text}\"\"\"
+
+    Inaccuracies to Correct:
+    {errors_summary}
+
+    Task:
+    Rewrite the original study notes to incorporate these corrections cleanly.
+    Maintain the original formatting, bullet points, and tone.
+    Do not add conversational fluff or meta-commentary; return only the revised notes.
+    """
+
+    response = client.models.generate_content(
+        model=MODEL_NAME,
+        contents=prompt,
+    )
+    return response.text.strip()

@@ -2,10 +2,14 @@ import sys
 from pathlib import Path
 from datetime import datetime, date
 
-# Add the project root ('Study Compass') to Python's sys.path
-ROOT_DIR = Path(__file__).resolve().parent.parent
+# Resolve project root ('Study Compass') from 'frontend/pages/'
+ROOT_DIR = Path(__file__).resolve().parent.parent.parent
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
+
+BACKEND_DIR = ROOT_DIR / "backend"
+if str(BACKEND_DIR) not in sys.path:
+    sys.path.insert(0, str(BACKEND_DIR))
 
 import streamlit as st
 import pandas as pd
@@ -25,6 +29,7 @@ if not courses:
 
 col1, col2 = st.columns([1, 2])
 
+# Column 1: Add New Exam
 with col1:
     with st.container(border=True):
         st.subheader("➕ Schedule New Exam")
@@ -42,7 +47,10 @@ with col1:
                 conn.commit()
                 st.success(f"Added {exam_name} for {target_course} on {exam_date}.")
                 st.rerun()
+            else:
+                st.error("Please enter an exam name.")
 
+# Column 2: Display Scheduled Exams
 with col2:
     st.subheader("📋 Scheduled Exams")
     exams = conn.execute("""
@@ -53,17 +61,34 @@ with col2:
     """).fetchall()
 
     if exams:
-        display_data = []
         for e in exams:
             days = (datetime.strptime(e['exam_date'], "%Y-%m-%d").date() - date.today()).days
-            display_data.append({
-                "Course": e['course_name'],
-                "Exam Name": e['exam_name'],
-                "Exam Date": e['exam_date'],
-                "Days Left": days,
-                "Status": "🚨 Crunch" if days <= 3 else ("⚠️ Imminent" if days <= 7 else "Normal")
-            })
 
-        st.dataframe(pd.DataFrame(display_data), use_container_width=True)
+            with st.container(border=True):
+                row_col1, row_col2, row_col3 = st.columns([3, 2, 1])
+
+                with row_col1:
+                    st.markdown(f"**{e['course_name']}**: {e['exam_name']}")
+                    st.caption(f"📅 Exam Date: {e['exam_date']}")
+
+                with row_col2:
+                    if days <= 0:
+                        st.error("🚨 Today / Overdue")
+                    elif days <= 3:
+                        st.error(f"⏰ {days} days left! Critical crunch time!")
+                    elif days <= 7:
+                        st.warning(f"⚠️ {days} days left")
+                    else:
+                        st.info(f"📅 {days} days left")
+
+                with row_col3:
+                    # Confirmation Popup for Deletion
+                    with st.popover("🗑️"):
+                        st.write(f"Delete **{e['exam_name']}**?")
+                        if st.button("Confirm", key=f"delete_exam_{e['id']}", type="primary"):
+                            conn.execute("DELETE FROM exams WHERE id = ?", (e['id'],))
+                            conn.commit()
+                            st.toast(f"Deleted {e['exam_name']}", icon="🗑️")
+                            st.rerun()
     else:
         st.info("No exams currently scheduled. Use the form on the left to set your first target date.")
