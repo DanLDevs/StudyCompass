@@ -181,6 +181,7 @@ def apply_note_corrections(course_text: str, detected_errors: list, model_name: 
 
     response = _generate_content_with_fallback(
         model=model_name,
+        contents=prompt,
         response_schema=None,
     )
     return response.text.strip()

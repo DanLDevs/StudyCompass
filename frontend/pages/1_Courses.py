@@ -15,7 +15,9 @@ import streamlit as st
 import time
 import streamlit.components.v1 as components
 import pandas as pd
+from docx import Document
 from pypdf import PdfReader
+from pptx import Presentation
 
 from backend.app.database import get_connection, init_db
 from backend.app.services.ai_service import generate_assessment_from_text, generate_practice_package, apply_note_corrections
@@ -26,6 +28,49 @@ init_db()
 conn = get_connection()
 
 st.set_page_config(page_title="StudyCompass | Courses", layout="wide")
+
+
+def extract_uploaded_text(uploaded_file) -> str:
+    """Extract readable text from a supported study-material file."""
+    file_type = Path(uploaded_file.name).suffix.lower()
+
+    if file_type == ".pdf":
+        reader = PdfReader(uploaded_file)
+        return "\n".join(
+            page.extract_text() or ""
+            for page in reader.pages
+        )
+
+    if file_type == ".docx":
+        document = Document(uploaded_file)
+        fragments = [paragraph.text for paragraph in document.paragraphs]
+        fragments.extend(
+            cell.text
+            for table in document.tables
+            for row in table.rows
+            for cell in row.cells
+        )
+        return "\n".join(fragment for fragment in fragments if fragment.strip())
+
+    if file_type == ".pptx":
+        presentation = Presentation(uploaded_file)
+        fragments = []
+        for slide in presentation.slides:
+            for shape in slide.shapes:
+                if shape.has_text_frame:
+                    fragments.append(shape.text)
+                if shape.has_table:
+                    fragments.extend(
+                        cell.text
+                        for row in shape.table.rows
+                        for cell in row.cells
+                    )
+        return "\n".join(fragment for fragment in fragments if fragment.strip())
+
+    if file_type == ".txt":
+        return uploaded_file.read().decode("utf-8")
+
+    raise ValueError("Unsupported file type. Upload a TXT, PDF, DOCX, or PPTX file.")
 
 # Session state setup
 session_defaults = {
@@ -141,18 +186,23 @@ with st.sidebar.expander("⚙️ Manage Course"):
 
 # Material Ingestion & Fact Checking
 st.subheader("1. Upload Study Material")
-uploaded_file = st.file_uploader("Upload study material (.txt or .pdf)", type=["txt", "pdf"])
+uploaded_file = st.file_uploader(
+    "Upload study material (.txt, .pdf, .docx, or .pptx)",
+    type=["txt", "pdf", "docx", "pptx"],
+)
 check_errors = st.toggle("🔍 Fact-check notes for errors", value=True)
 
 if uploaded_file and st.button("Analyze Notes & Prepare Assessment"):
     with st.spinner("Parsing notes and checking for misconceptions..."):
-        text = ""
-        if uploaded_file.name.endswith(".pdf"):
-            reader = PdfReader(uploaded_file)
-            for page in reader.pages:
-                text += page.extract_text() or ""
-        else:
-            text = uploaded_file.read().decode("utf-8")
+        try:
+            text = extract_uploaded_text(uploaded_file)
+        except Exception as error:
+            st.error(f"Could not read {uploaded_file.name}: {error}")
+            st.stop()
+
+        if not text.strip():
+            st.error(f"No readable text was found in {uploaded_file.name}.")
+            st.stop()
 
         st.session_state.course_text = text[:4000]  # Limit to first 4000 chars for LLM
 
@@ -191,7 +241,6 @@ if uploaded_file and st.button("Analyze Notes & Prepare Assessment"):
             st.session_state.pending_assessment = None
             st.session_state.reviewing_corrections = False
 
-        st.session_state.mastery = {}
         st.session_state.quiz_submitted = False
         st.session_state.practice_package = None
         st.rerun()
@@ -280,7 +329,7 @@ if st.session_state.assessment and not st.session_state.quiz_submitted and not s
                 topic_correct[q.topic] = topic_correct.get(q.topic, 0) + (1 if is_correct else 0)
 
             # Assign initial scores (0.25 baseline for incorrect, 0.90 for correct)
-            updated_mastery = {}
+            updated_mastery = dict(st.session_state.mastery)
             for topic, total in topic_totals.items():
                 ratio = topic_correct[topic] / total
                 score = 0.90 if ratio == 1.0 else (0.50 if ratio > 0 else 0.25)
