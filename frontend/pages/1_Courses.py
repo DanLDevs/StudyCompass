@@ -324,12 +324,12 @@ if uploaded_file and st.button("Analyze Notes & Prepare Assessment"):
             assessment = generate_assessment_from_chunks(
                 chunks,
                 check_correctness=check_errors, 
-                model_name=st.session_state.get("selected_model", "gemini-2.5-flash")
+                model_name=st.session_state.get("selected_model", "gemini-3.5-flash")
             )
         except Exception as e:
             e_str = str(e).upper()
             if "429" in e_str or "RESOURCE_EXHAUSTED" in e_str:
-                st.error("⏳ Both Gemini 2.5 Flash and Flash-Lite have reached their rate limits. Please wait a few minutes and try again.")
+                st.error("⏳ Both Gemini 3.5 Flash and Flash-Lite have reached their rate limits. Please wait a few minutes and try again.")
             elif "503" in e_str or "UNAVAILABLE" in e_str:
                 st.error("🛰️ **Gemini Cluster Busy (503):** Google's AI servers are momentarily congested. Click the button to try again.")
             else:
