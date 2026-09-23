@@ -127,7 +127,7 @@ CHUNKING_VERSION = "semantic-v1"
 
 
 def semantic_chunk_text(text: str) -> list[dict[str, int | str]]:
-    """Split notes at paragraph and sentence boundaries with bounded overlap."""
+    # Split notes at paragraph and sentence boundaries with bounded overlap.
     paragraphs = [part.strip() for part in re.split(r"\n\s*\n+", text) if part.strip()]
     chunks = []
     current = ""
@@ -174,7 +174,7 @@ def generate_assessment_from_chunks(
     check_correctness: bool = False,
     model_name: str = PRIMARY_MODEL,
 ) -> Assessment:
-    """Analyze every semantic chunk, then synthesize one document-wide assessment."""
+    # Analyze every semantic chunk, then synthesize one document-wide assessment
     analyses = []
     for chunk in chunks:
         correctness_instruction = (

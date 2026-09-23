@@ -46,7 +46,7 @@ st.set_page_config(page_title="StudyCompass | Courses", layout="wide")
 
 
 def extract_uploaded_text(uploaded_file) -> str:
-    """Extract readable text from a supported study-material file."""
+    # Extract readable text from a supported study-material file.
     file_type = Path(uploaded_file.name).suffix.lower()
 
     if file_type == ".pdf":
@@ -89,7 +89,7 @@ def extract_uploaded_text(uploaded_file) -> str:
 
 
 def get_topic_context(connection, document_id: int | None, topic: str, fallback_text: str) -> str:
-    """Retrieve the most relevant ordered chunks for a practice topic."""
+    # Retrieve the most relevant ordered chunks for a practice topic.
     if not document_id:
         return fallback_text
 
