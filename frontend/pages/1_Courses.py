@@ -1,4 +1,6 @@
 import sys
+import hashlib
+import json
 from pathlib import Path
 import random
 
@@ -15,10 +17,25 @@ import streamlit as st
 import time
 import streamlit.components.v1 as components
 import pandas as pd
+from docx import Document
 from pypdf import PdfReader
+from pptx import Presentation
 
 from backend.app.database import get_connection, init_db
-from backend.app.services.ai_service import generate_assessment_from_text, generate_practice_package, apply_note_corrections
+from backend.app.services.ai_service import (
+    CHUNKING_VERSION,
+    NoteError,
+    apply_note_corrections,
+    generate_assessment_from_chunks,
+    generate_practice_package,
+    semantic_chunk_text,
+)
+from backend.app.services.cheat_sheet_service import (
+    PDF_RENDER_VERSION,
+    generate_cheat_sheet,
+    render_markdown,
+    render_pdf,
+)
 from backend.app.services.srs_service import calculate_sm2
 from backend.app.services.recommendation_service import get_prioritized_topic
 
@@ -27,13 +44,98 @@ conn = get_connection()
 
 st.set_page_config(page_title="StudyCompass | Courses", layout="wide")
 
+
+def extract_uploaded_text(uploaded_file) -> str:
+    # Extract readable text from a supported study-material file.
+    file_type = Path(uploaded_file.name).suffix.lower()
+
+    if file_type == ".pdf":
+        reader = PdfReader(uploaded_file)
+        return "\n".join(
+            page.extract_text() or ""
+            for page in reader.pages
+        )
+
+    if file_type == ".docx":
+        document = Document(uploaded_file)
+        fragments = [paragraph.text for paragraph in document.paragraphs]
+        fragments.extend(
+            cell.text
+            for table in document.tables
+            for row in table.rows
+            for cell in row.cells
+        )
+        return "\n".join(fragment for fragment in fragments if fragment.strip())
+
+    if file_type == ".pptx":
+        presentation = Presentation(uploaded_file)
+        fragments = []
+        for slide in presentation.slides:
+            for shape in slide.shapes:
+                if shape.has_text_frame:
+                    fragments.append(shape.text)
+                if shape.has_table:
+                    fragments.extend(
+                        cell.text
+                        for row in shape.table.rows
+                        for cell in row.cells
+                    )
+        return "\n".join(fragment for fragment in fragments if fragment.strip())
+
+    if file_type == ".txt":
+        return uploaded_file.read().decode("utf-8")
+
+    raise ValueError("Unsupported file type. Upload a TXT, PDF, DOCX, or PPTX file.")
+
+
+def get_topic_context(connection, document_id: int | None, topic: str, fallback_text: str) -> str:
+    # Retrieve the most relevant ordered chunks for a practice topic.
+    if not document_id:
+        return fallback_text
+
+    chunks = connection.execute(
+        """
+        SELECT chunk_index, chunk_text
+        FROM document_chunks
+        WHERE document_id = ?
+        ORDER BY chunk_index
+        """,
+        (document_id,),
+    ).fetchall()
+    if not chunks:
+        return fallback_text
+
+    terms = {term for term in topic.lower().split() if len(term) > 2}
+    ranked = sorted(
+        chunks,
+        key=lambda chunk: sum(
+            chunk["chunk_text"].lower().count(term)
+            for term in terms
+        ),
+        reverse=True,
+    )
+    selected_indices = {chunk["chunk_index"] for chunk in ranked[:4] if any(
+        term in chunk["chunk_text"].lower() for term in terms
+    )}
+    if not selected_indices:
+        selected_indices = {chunks[0]["chunk_index"]}
+
+    selected = [chunk for chunk in chunks if chunk["chunk_index"] in selected_indices]
+    return "\n\n".join(
+        f"Section {chunk['chunk_index'] + 1}:\n{chunk['chunk_text']}"
+        for chunk in selected
+    )
+
 # Session state setup
 session_defaults = {
     "mastery": {},
     "assessment": None,
     "quiz_submitted": False,
     "course_text": "",
+    "document_id": None,
     "practice_package": None,
+    "cheat_sheet_markdown": None,
+    "cheat_sheet_pdf": None,
     "card_flipped": False,
     "scrambled_defs": [],
     "current_course_id": None,
@@ -91,16 +193,36 @@ if active_course_id != st.session_state.current_course_id:
     st.session_state.pending_assessment = None
     st.session_state.reviewing_corrections = False
     st.session_state.practice_package = None
+    st.session_state.cheat_sheet_markdown = None
+    st.session_state.cheat_sheet_pdf = None
     st.session_state.srs_queue = None
     st.session_state.srs_completed = None
 
     if active_course_id:
+        latest_document = conn.execute(
+            """
+            SELECT id, extracted_text, processing_version
+            FROM documents
+            WHERE course_id = ?
+            ORDER BY uploaded_at DESC, id DESC
+            LIMIT 1
+            """,
+            (active_course_id,),
+        ).fetchone()
+        if latest_document:
+            st.session_state.document_id = latest_document["id"]
+            st.session_state.course_text = latest_document["extracted_text"]
+            if latest_document["processing_version"] == "legacy":
+                st.warning("This course has older truncated study material. Re-upload the original file for complete processing.")
+
         rows = conn.execute(
             "SELECT topic_name, mastery_score FROM topic_mastery WHERE course_id = ?", (active_course_id,)
         ).fetchall()
         st.session_state.mastery = {r["topic_name"]: r["mastery_score"] for r in rows}
         st.session_state.quiz_submitted = bool(st.session_state.mastery)
     else:
+        st.session_state.document_id = None
+        st.session_state.course_text = ""
         st.session_state.mastery = {}
         st.session_state.quiz_submitted = False
 
@@ -141,44 +263,95 @@ with st.sidebar.expander("⚙️ Manage Course"):
 
 # Material Ingestion & Fact Checking
 st.subheader("1. Upload Study Material")
-uploaded_file = st.file_uploader("Upload study material (.txt or .pdf)", type=["txt", "pdf"])
+uploaded_file = st.file_uploader(
+    "Upload study material (.txt, .pdf, .docx, or .pptx)",
+    type=["txt", "pdf", "docx", "pptx"],
+)
 check_errors = st.toggle("🔍 Fact-check notes for errors", value=True)
 
 if uploaded_file and st.button("Analyze Notes & Prepare Assessment"):
     with st.spinner("Parsing notes and checking for misconceptions..."):
-        text = ""
-        if uploaded_file.name.endswith(".pdf"):
-            reader = PdfReader(uploaded_file)
-            for page in reader.pages:
-                text += page.extract_text() or ""
-        else:
-            text = uploaded_file.read().decode("utf-8")
+        try:
+            text = extract_uploaded_text(uploaded_file)
+        except Exception as error:
+            st.error(f"Could not read {uploaded_file.name}: {error}")
+            st.stop()
 
-        st.session_state.course_text = text[:4000]  # Limit to first 4000 chars for LLM
+        if not text.strip():
+            st.error(f"No readable text was found in {uploaded_file.name}.")
+            st.stop()
+
+        chunks = semantic_chunk_text(text)
+        if not chunks:
+            st.error(f"No semantic sections could be created from {uploaded_file.name}.")
+            st.stop()
+
+        st.session_state.course_text = text
 
         # Initial Document Save
-        conn.execute(
-            "INSERT INTO documents (course_id, filename, extracted_text) VALUES (?, ?, ?)",
-            (active_course_id, uploaded_file.name, st.session_state.course_text)
+        document_cursor = conn.execute(
+            """
+            INSERT INTO documents
+                (course_id, filename, extracted_text, processing_version)
+            VALUES (?, ?, ?, ?)
+            """,
+            (active_course_id, uploaded_file.name, st.session_state.course_text, CHUNKING_VERSION)
+        )
+        document_id = document_cursor.lastrowid
+        conn.executemany(
+            """
+            INSERT INTO document_chunks
+                (document_id, chunk_index, chunk_text, start_offset, end_offset, chunking_version)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    document_id,
+                    chunk["chunk_index"],
+                    chunk["chunk_text"],
+                    chunk["start_offset"],
+                    chunk["end_offset"],
+                    CHUNKING_VERSION,
+                )
+                for chunk in chunks
+            ],
         )
         conn.commit()
+        st.session_state.document_id = document_id
 
         try:
             # Generate assessment and error analysis
-            assessment = generate_assessment_from_text(
-                st.session_state.course_text, 
+            assessment = generate_assessment_from_chunks(
+                chunks,
                 check_correctness=check_errors, 
-                model_name=st.session_state.get("selected_model", "gemini-2.5-flash")
+                model_name=st.session_state.get("selected_model", "gemini-3.5-flash")
             )
         except Exception as e:
             e_str = str(e).upper()
             if "429" in e_str or "RESOURCE_EXHAUSTED" in e_str:
-                st.error("⏳ Both Gemini 2.5 Flash and Flash-Lite have reached their rate limits. Please wait a few minutes and try again.")
+                st.error("⏳ Both Gemini 3.5 Flash and Flash-Lite have reached their rate limits. Please wait a few minutes and try again.")
             elif "503" in e_str or "UNAVAILABLE" in e_str:
                 st.error("🛰️ **Gemini Cluster Busy (503):** Google's AI servers are momentarily congested. Click the button to try again.")
             else:
                 st.error(f"⚠️ **AI Service Error: {e_str}")
             st.stop()
+
+        for error in assessment.detected_errors:
+            conn.execute(
+                """
+                INSERT INTO note_errors
+                    (course_id, document_id, claimed_concept, correction, severity)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    active_course_id,
+                    document_id,
+                    error.claimed_concept,
+                    error.correction,
+                    error.severity,
+                ),
+            )
+        conn.commit()
 
         # Decision Gate: Check for misconceptions
         if check_errors and assessment.detected_errors:
@@ -191,7 +364,6 @@ if uploaded_file and st.button("Analyze Notes & Prepare Assessment"):
             st.session_state.pending_assessment = None
             st.session_state.reviewing_corrections = False
 
-        st.session_state.mastery = {}
         st.session_state.quiz_submitted = False
         st.session_state.practice_package = None
         st.rerun()
@@ -223,11 +395,32 @@ if st.session_state.reviewing_corrections and st.session_state.pending_assessmen
                 # Update the database document with corrected text
                 conn.execute("""
                     UPDATE documents
-                    SET extracted_text = ?
-                    WHERE course_id = ? AND id = (
-                        SELECT id FROM documents WHERE course_id = ? ORDER BY uploaded_at DESC LIMIT 1
-                    )
-                """, (corrected_text, active_course_id, active_course_id))
+                    SET extracted_text = ?, processing_version = ?
+                    WHERE id = ? AND course_id = ?
+                """, (corrected_text, CHUNKING_VERSION, st.session_state.document_id, active_course_id))
+                corrected_chunks = semantic_chunk_text(corrected_text)
+                conn.execute(
+                    "DELETE FROM document_chunks WHERE document_id = ?",
+                    (st.session_state.document_id,),
+                )
+                conn.executemany(
+                    """
+                    INSERT INTO document_chunks
+                        (document_id, chunk_index, chunk_text, start_offset, end_offset, chunking_version)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        (
+                            st.session_state.document_id,
+                            chunk["chunk_index"],
+                            chunk["chunk_text"],
+                            chunk["start_offset"],
+                            chunk["end_offset"],
+                            CHUNKING_VERSION,
+                        )
+                        for chunk in corrected_chunks
+                    ],
+                )
                 conn.commit()
 
                 # Brief pause to stay clear of rate limits
@@ -235,8 +428,8 @@ if st.session_state.reviewing_corrections and st.session_state.pending_assessmen
 
 
                 # Regenerate assessment based on accurate material
-                st.session_state.assessment = generate_assessment_from_text(
-                    corrected_text, 
+                st.session_state.assessment = generate_assessment_from_chunks(
+                    corrected_chunks,
                     check_correctness=False,
                     model_name=st.session_state.selected_model
                 )
@@ -280,7 +473,7 @@ if st.session_state.assessment and not st.session_state.quiz_submitted and not s
                 topic_correct[q.topic] = topic_correct.get(q.topic, 0) + (1 if is_correct else 0)
 
             # Assign initial scores (0.25 baseline for incorrect, 0.90 for correct)
-            updated_mastery = {}
+            updated_mastery = dict(st.session_state.mastery)
             for topic, total in topic_totals.items():
                 ratio = topic_correct[topic] / total
                 score = 0.90 if ratio == 1.0 else (0.50 if ratio > 0 else 0.25)
@@ -335,7 +528,12 @@ if st.session_state.quiz_submitted and st.session_state.mastery:
             with st.spinner(f"Generating drills & flashcards for {weakest_topic}..."):
                 st.session_state.practice_package = generate_practice_package(
                     weakest_topic, 
-                    st.session_state.course_text,
+                    get_topic_context(
+                        conn,
+                        st.session_state.document_id,
+                        weakest_topic,
+                        st.session_state.course_text,
+                    ),
                     model_name=st.session_state.selected_model
                 )
                 # Scramble definitions once upon generation
@@ -345,6 +543,97 @@ if st.session_state.quiz_submitted and st.session_state.mastery:
                 st.session_state.srs_queue = None
                 st.session_state.srs_completed = False     
                 st.rerun()
+
+
+    st.divider()
+    st.subheader("4. Personalized Cheat Sheet")
+    st.caption("Synthesizes your lowest-mastery topics and flagged misconceptions into one study guide.")
+    if st.button("Generate Personalized Cheat Sheet", use_container_width=True):
+        with st.spinner("Synthesizing your personalized cheat sheet..."):
+            errors = conn.execute(
+                """
+                SELECT claimed_concept, correction, severity
+                FROM note_errors
+                WHERE course_id = ?
+                ORDER BY created_at DESC, id DESC
+                """,
+                (active_course_id,),
+            ).fetchall()
+            chunks = conn.execute(
+                """
+                SELECT chunk_index, chunk_text
+                FROM document_chunks
+                WHERE document_id = ?
+                ORDER BY chunk_index
+                """,
+                (st.session_state.document_id,),
+            ).fetchall()
+            error_models = [NoteError(**dict(error)) for error in errors]
+            context = {
+                "document_id": st.session_state.document_id,
+                "mastery": st.session_state.mastery,
+                "errors": [dict(error) for error in errors],
+                    "pdf_render_version": PDF_RENDER_VERSION,
+            }
+            context_hash = hashlib.sha256(
+                json.dumps(context, sort_keys=True, default=str).encode("utf-8")
+            ).hexdigest()
+            existing_guide = conn.execute(
+                """
+                SELECT markdown_content, pdf_content
+                FROM study_guides
+                WHERE course_id = ? AND document_id = ? AND context_hash = ?
+                ORDER BY generated_at DESC, id DESC
+                LIMIT 1
+                """,
+                (active_course_id, st.session_state.document_id, context_hash),
+            ).fetchone()
+            if existing_guide:
+                markdown = existing_guide["markdown_content"]
+                pdf = existing_guide["pdf_content"]
+            else:
+                cheat_sheet = generate_cheat_sheet(
+                    selected_course_name,
+                    st.session_state.mastery,
+                    error_models,
+                    [dict(chunk) for chunk in chunks],
+                    st.session_state.selected_model,
+                )
+                markdown = render_markdown(cheat_sheet)
+                pdf = render_pdf(cheat_sheet)
+                conn.execute(
+                    """
+                    INSERT INTO study_guides
+                        (course_id, document_id, context_hash, markdown_content, pdf_content)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (active_course_id, st.session_state.document_id, context_hash, markdown, pdf),
+                )
+                conn.commit()
+            st.session_state.cheat_sheet_markdown = markdown
+            st.session_state.cheat_sheet_pdf = pdf
+
+    if st.session_state.cheat_sheet_markdown:
+        with st.container(border=True):
+            st.markdown(st.session_state.cheat_sheet_markdown)
+        download_col1, download_col2 = st.columns(2)
+        with download_col1:
+            st.download_button(
+                "Download Markdown",
+                data=st.session_state.cheat_sheet_markdown,
+                file_name=f"{selected_course_name.lower().replace(' ', '-')}-cheat-sheet.md",
+                mime="text/markdown",
+                use_container_width=True,
+            )
+        with download_col2:
+            if st.session_state.cheat_sheet_pdf:
+                st.download_button(
+                    "Download PDF",
+                    data=st.session_state.cheat_sheet_pdf,
+                    file_name=f"{selected_course_name.lower().replace(' ', '-')}-cheat-sheet.pdf",
+                    mime="application/pdf",
+                    use_container_width=True,
+                )
 
 # Practice Hub (MCQ, Flashcards, Matching)
 if st.session_state.practice_package:
