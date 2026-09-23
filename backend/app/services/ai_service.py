@@ -1,5 +1,6 @@
 # LLM extraction & quiz generation logic
 import os
+import re
 import time
 from tenacity import (
     retry,
@@ -10,7 +11,7 @@ from tenacity import (
 from google import genai
 from google.genai import errors
 from pydantic import BaseModel, Field
-from typing import List
+from typing import List, Sequence
 from dotenv import load_dotenv
 
 load_dotenv()  # Load environment variables from .env file
@@ -40,6 +41,11 @@ class Assessment(BaseModel):
     detected_errors: List[NoteError] = Field(default_factory=list)
     topic: List[str]
     questions: List[Question]
+
+class ChunkAnalysis(BaseModel):
+    topics: List[str]
+    evidence: str
+    detected_errors: List[NoteError] = Field(default_factory=list)
 
 # Flashcard Schema
 class Flashcard(BaseModel):
@@ -114,6 +120,98 @@ def _generate_content_with_fallback(model: str, contents: str, response_schema=N
                 raise fallback_error from primary_error
         # If the error is not related to quota or if no fallback is available, re-raise the original error
         raise primary_error
+
+CHUNK_TARGET_CHARS = 2600
+CHUNK_OVERLAP_CHARS = 300
+CHUNKING_VERSION = "semantic-v1"
+
+
+def semantic_chunk_text(text: str) -> list[dict[str, int | str]]:
+    """Split notes at paragraph and sentence boundaries with bounded overlap."""
+    paragraphs = [part.strip() for part in re.split(r"\n\s*\n+", text) if part.strip()]
+    chunks = []
+    current = ""
+    current_start = 0
+
+    for paragraph in paragraphs:
+        pieces = [paragraph]
+        if len(paragraph) > CHUNK_TARGET_CHARS:
+            pieces = [
+                piece.strip()
+                for piece in re.split(r"(?<=[.!?])\s+", paragraph)
+                if piece.strip()
+            ]
+
+        for piece in pieces:
+            candidate = f"{current}\n\n{piece}" if current else piece
+            if current and len(candidate) > CHUNK_TARGET_CHARS:
+                end = current_start + len(current)
+                chunks.append({
+                    "chunk_index": len(chunks),
+                    "chunk_text": current,
+                    "start_offset": current_start,
+                    "end_offset": end,
+                })
+                overlap = current[-CHUNK_OVERLAP_CHARS:]
+                current = f"{overlap}\n\n{piece}".strip()
+                current_start = max(0, end - len(overlap))
+            else:
+                current = candidate
+
+    if current:
+        chunks.append({
+            "chunk_index": len(chunks),
+            "chunk_text": current,
+            "start_offset": current_start,
+            "end_offset": current_start + len(current),
+        })
+
+    return chunks
+
+
+def generate_assessment_from_chunks(
+    chunks: Sequence[dict[str, int | str]],
+    check_correctness: bool = False,
+    model_name: str = PRIMARY_MODEL,
+) -> Assessment:
+    """Analyze every semantic chunk, then synthesize one document-wide assessment."""
+    analyses = []
+    for chunk in chunks:
+        correctness_instruction = (
+            "Identify factual inaccuracies and list corrections. "
+            if check_correctness else ""
+        )
+        prompt = (
+            "You are analyzing one section of a larger study document. "
+            "Extract the important concepts and concise evidence that should inform a document-wide quiz. "
+            f"{correctness_instruction}Return no quiz questions.\n\n"
+            f"Section {chunk['chunk_index'] + 1}:\n{chunk['chunk_text']}"
+        )
+        response = _generate_content_with_fallback(
+            model=model_name,
+            contents=prompt,
+            response_schema=ChunkAnalysis,
+        )
+        analyses.append(ChunkAnalysis.model_validate_json(response.text))
+
+    summaries = "\n\n".join(
+        f"Section {index + 1}: Topics={analysis.topics}; "
+        f"Evidence={analysis.evidence}; Errors={analysis.detected_errors}"
+        for index, analysis in enumerate(analyses)
+    )
+    prompt = (
+        "You are creating a document-wide diagnostic assessment from section analyses. "
+        "Identify the 4 most important topics across all sections and create exactly 4 multiple-choice "
+        "questions, one per topic, with 4 options each. Avoid duplicate topics and questions. "
+        "Use only the supplied evidence. Include detected_errors only when correctness checking is enabled.\n\n"
+        f"Correctness checking enabled: {check_correctness}\n{summaries}"
+    )
+    response = _generate_content_with_fallback(
+        model=model_name,
+        contents=prompt,
+        response_schema=Assessment,
+    )
+    return Assessment.model_validate_json(response.text)
 
 # Service Functions
 def generate_assessment_from_text(course_text: str, check_correctness: bool = False, model_name: str = PRIMARY_MODEL) -> Assessment:

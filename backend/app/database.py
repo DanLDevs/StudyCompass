@@ -28,10 +28,73 @@ def init_db():
             course_id INTEGER NOT NULL,
             filename TEXT NOT NULL,
             extracted_text TEXT NOT NULL,
+            processing_version TEXT NOT NULL DEFAULT 'legacy',
             uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (course_id) REFERENCES courses (id) ON DELETE CASCADE
         );
     """)
+
+    document_columns = {
+        row[1] for row in cursor.execute("PRAGMA table_info(documents)")
+    }
+    if "processing_version" not in document_columns:
+        cursor.execute(
+            "ALTER TABLE documents ADD COLUMN processing_version TEXT NOT NULL DEFAULT 'legacy'"
+        )
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS document_chunks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            document_id INTEGER NOT NULL,
+            chunk_index INTEGER NOT NULL,
+            chunk_text TEXT NOT NULL,
+            start_offset INTEGER NOT NULL,
+            end_offset INTEGER NOT NULL,
+            chunking_version TEXT NOT NULL,
+            UNIQUE(document_id, chunk_index),
+            FOREIGN KEY (document_id) REFERENCES documents (id) ON DELETE CASCADE
+        );
+    """)
+
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_document_chunks_document_order
+        ON document_chunks (document_id, chunk_index)
+    """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS note_errors (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            course_id INTEGER NOT NULL,
+            document_id INTEGER,
+            claimed_concept TEXT NOT NULL,
+            correction TEXT NOT NULL,
+            severity TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (course_id) REFERENCES courses (id) ON DELETE CASCADE,
+            FOREIGN KEY (document_id) REFERENCES documents (id) ON DELETE CASCADE
+        );
+    """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS study_guides (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            course_id INTEGER NOT NULL,
+            document_id INTEGER,
+            context_hash TEXT NOT NULL,
+            markdown_content TEXT NOT NULL,
+            pdf_content BLOB,
+            generated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(course_id, document_id, context_hash),
+            FOREIGN KEY (course_id) REFERENCES courses (id) ON DELETE CASCADE,
+            FOREIGN KEY (document_id) REFERENCES documents (id) ON DELETE CASCADE
+        );
+    """)
+
+    study_guide_columns = {
+        row[1] for row in cursor.execute("PRAGMA table_info(study_guides)")
+    }
+    if "pdf_content" not in study_guide_columns:
+        cursor.execute("ALTER TABLE study_guides ADD COLUMN pdf_content BLOB")
 
     # Topic Mastery Table
     cursor.execute("""
