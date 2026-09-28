@@ -36,6 +36,10 @@ class Question(BaseModel):
     question_text: str
     options: List[str]
     correct_option_index: int
+    explanation: str | None = Field(
+        default=None,
+        description="A concise explanation of why the correct answer is right.",
+    )
 
 class Assessment(BaseModel):
     detected_errors: List[NoteError] = Field(default_factory=list)
@@ -245,9 +249,10 @@ def generate_practice_package(topic: str, course_text: str, model_name: str = PR
     Target Weak Topic: '{topic}'
 
     Generate a complete targeted study package focused strictly on this weak topic:
-    1. 4 targeted multiple-choice questions with 4 options each and a correct answer index.
+    1. 4 targeted multiple-choice questions with 4 options each, a correct answer index, and a concise explanation of why the correct answer is right.
     2. 5 flashcards covering important definitions, examples, distinctions, or worked solutions.
     3. 4 matching pairs linking distinct terms or concepts to concise explanations.
+    Keep each question explanation brief and grounded only in the supplied context. For each question, explain the key idea the learner should remember, especially when a distractor reflects a common misconception.
     """
 
     response = _generate_content_with_fallback(

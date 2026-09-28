@@ -1,5 +1,6 @@
 import sys
 import hashlib
+from html import escape
 import json
 from pathlib import Path
 import random
@@ -134,6 +135,8 @@ session_defaults = {
     "course_text": "",
     "document_id": None,
     "practice_package": None,
+    "practice_quiz_submitted": False,
+    "practice_quiz_answers": {},
     "cheat_sheet_markdown": None,
     "cheat_sheet_pdf": None,
     "card_flipped": False,
@@ -193,6 +196,8 @@ if active_course_id != st.session_state.current_course_id:
     st.session_state.pending_assessment = None
     st.session_state.reviewing_corrections = False
     st.session_state.practice_package = None
+    st.session_state.practice_quiz_submitted = False
+    st.session_state.practice_quiz_answers = {}
     st.session_state.cheat_sheet_markdown = None
     st.session_state.cheat_sheet_pdf = None
     st.session_state.srs_queue = None
@@ -255,6 +260,8 @@ with st.sidebar.expander("⚙️ Manage Course"):
                 st.session_state.assessment = None
                 st.session_state.reviewing_corrections = False
                 st.session_state.practice_package = None
+                st.session_state.practice_quiz_submitted = False
+                st.session_state.practice_quiz_answers = {}
                 st.rerun()
         with col2:
             if st.button("Cancel", use_container_width=True):
@@ -366,6 +373,8 @@ if uploaded_file and st.button("Analyze Notes & Prepare Assessment"):
 
         st.session_state.quiz_submitted = False
         st.session_state.practice_package = None
+        st.session_state.practice_quiz_submitted = False
+        st.session_state.practice_quiz_answers = {}
         st.rerun()
 
 # Interactive Decision Gate for Detected Misconceptions
@@ -536,6 +545,8 @@ if st.session_state.quiz_submitted and st.session_state.mastery:
                     ),
                     model_name=st.session_state.selected_model
                 )
+                st.session_state.practice_quiz_submitted = False
+                st.session_state.practice_quiz_answers = {}
                 # Scramble definitions once upon generation
                 defs = [p.definition for p in st.session_state.practice_package.matching_pairs]
                 random.shuffle(defs)
@@ -648,31 +659,86 @@ if st.session_state.practice_package:
     ])
 
     with tab_mcq:
-        with st.form("mcq_form"):
-            answers = {}
+        if not st.session_state.practice_quiz_submitted:
+            with st.form("mcq_form"):
+                answers = {}
+                for idx, q in enumerate(pkg.multiple_choice):
+                    st.write(f"**Q{idx + 1}: {q.question_text}**")
+                    answers[idx] = st.radio(
+                        f"Options for Q{idx+1}",
+                        q.options,
+                        key=f"drill_q{idx}",
+                        label_visibility="collapsed",
+                    )
+
+                if st.form_submit_button("Submit Quiz & Update Mastery"):
+                    selected_indexes = {
+                        idx: q.options.index(answers[idx])
+                        for idx, q in enumerate(pkg.multiple_choice)
+                    }
+                    correct = sum(
+                        selected_indexes[idx] == q.correct_option_index
+                        for idx, q in enumerate(pkg.multiple_choice)
+                    )
+                    score = correct / len(pkg.multiple_choice)
+                    prev = st.session_state.mastery.get(pkg.topic, 0.5)
+                    new_score = round((prev * 0.4) + (score * 0.6), 2)
+
+                    conn.execute("""
+                        INSERT INTO topic_mastery (course_id, topic_name, mastery_score)
+                        VALUES (?, ?, ?)
+                        ON CONFLICT(course_id, topic_name) DO UPDATE SET mastery_score = excluded.mastery_score
+                    """, (active_course_id, pkg.topic, new_score))
+                    conn.commit()
+
+                    st.session_state.mastery[pkg.topic] = new_score
+                    st.session_state.practice_quiz_answers = selected_indexes
+                    st.session_state.practice_quiz_submitted = True
+                    st.toast(f"Mastery on {pkg.topic} recalibrated to {int(new_score * 100)}%!", icon="📈")
+                    st.rerun()
+        else:
+            selected_indexes = st.session_state.practice_quiz_answers
+            correct = sum(
+                selected_indexes.get(idx) == q.correct_option_index
+                for idx, q in enumerate(pkg.multiple_choice)
+            )
+            st.success(f"You got {correct} of {len(pkg.multiple_choice)} questions correct.")
+
             for idx, q in enumerate(pkg.multiple_choice):
+                selected_index = selected_indexes.get(idx)
+                is_correct = selected_index == q.correct_option_index
                 st.write(f"**Q{idx + 1}: {q.question_text}**")
-                answers[idx] = st.radio(f"Options for Q{idx+1}", q.options, key=f"drill_q{idx}", label_visibility="collapsed")
 
-            if st.form_submit_button("Submit Quiz & Update Mastery"):
-                correct = sum(
-                    1 for idx, q in enumerate(pkg.multiple_choice)
-                    if q.options.index(answers[idx]) == q.correct_option_index
-                )
-                score = correct / len(pkg.multiple_choice)
-                prev = st.session_state.mastery.get(pkg.topic, 0.5)
-                new_score = round((prev * 0.4) + (score * 0.6), 2)
+                for option_idx, option in enumerate(q.options):
+                    if option_idx == q.correct_option_index:
+                        background = "#dcfce7"
+                        border = "#15803d"
+                        text_color = "#14532d"
+                        label = "Correct answer"
+                    elif option_idx == selected_index:
+                        background = "#fee2e2"
+                        border = "#b91c1c"
+                        text_color = "#7f1d1d"
+                        label = "Your answer"
+                    else:
+                        background = "#f8fafc"
+                        border = "#94a3b8"
+                        text_color = "#1e293b"
+                        label = ""
 
-                # Persist the updated mastery score to the database
-                conn.execute("""
-                    INSERT INTO topic_mastery (course_id, topic_name, mastery_score)
-                    VALUES (?, ?, ?)
-                    ON CONFLICT(course_id, topic_name) DO UPDATE SET mastery_score = excluded.mastery_score
-                """, (active_course_id, pkg.topic, new_score))
-                conn.commit()
+                    label_html = f' <small style="font-weight:700;">{label}</small>' if label else ""
+                    st.markdown(
+                        f'<div style="background:{background}; border:2px solid {border}; color:{text_color}; border-radius:4px; padding:0.45rem 0.7rem; margin:0.25rem 0; font-weight:600;">{escape(option)}{label_html}</div>',
+                        unsafe_allow_html=True,
+                    )
 
-                st.session_state.mastery[pkg.topic] = new_score
-                st.toast(f"Mastery on {pkg.topic} recalibrated to {int(new_score * 100)}%!", icon="📈")
+                if not is_correct:
+                    explanation = q.explanation or "Review the correct answer and compare it with the concept in your study material."
+                    st.info(f"**Why this matters:** {explanation}")
+
+            if st.button("Retry Target Quiz", key="retry_practice_quiz"):
+                st.session_state.practice_quiz_submitted = False
+                st.session_state.practice_quiz_answers = {}
                 st.rerun()
 
     with tab_cards:
