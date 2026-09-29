@@ -21,8 +21,8 @@ if not api_key:
     raise ValueError("GEMINI_API_KEY not found in environment variables. Please set it in your .env file.")
 
 client = genai.Client(api_key=api_key)
-PRIMARY_MODEL = "gemini-3.5-flash"
-FALLBACK_MODEL = "gemini-3.5-flash-lite"
+PRIMARY_MODEL = "gemini-3.5-flash-lite"
+FALLBACK_MODEL = "gemini-3.5-flash"
 DEFAULT_MODEL = PRIMARY_MODEL  # Default model for all AI service functions
 
 # Pydantic Schemas for AI Service Responses
