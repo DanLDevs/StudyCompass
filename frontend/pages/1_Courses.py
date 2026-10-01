@@ -4,6 +4,7 @@ from html import escape
 import json
 from pathlib import Path
 import random
+from datetime import datetime
 
 # Resolve project root ('Study Compass') from 'frontend/pages/'
 ROOT_DIR = Path(__file__).resolve().parent.parent.parent
@@ -946,17 +947,31 @@ if st.session_state.practice_package:
                         reps = row["repetitions"] if row else 0
                         ef = row["ease_factor"] if row else 2.5
                         interval = row["interval"] if row else 0
+                        reviewed_at = datetime.now()
 
-                        new_reps, new_ef, new_interval, next_due = calculate_sm2(grade, reps, ef, interval)
+                        new_reps, new_ef, new_interval, next_due = calculate_sm2(
+                            grade,
+                            reps,
+                            ef,
+                            interval,
+                            now=reviewed_at,
+                        )
 
                         conn.execute(
                             """
                             UPDATE flashcards
                             SET interval = ?, repetitions = ?, ease_factor = ?,
-                                due_date = ?, last_reviewed_at = CURRENT_TIMESTAMP
+                                due_date = ?, last_reviewed_at = ?
                             WHERE id = ?
                             """,
-                            (new_interval, new_reps, new_ef, next_due, card["id"]),
+                            (
+                                new_interval,
+                                new_reps,
+                                new_ef,
+                                next_due,
+                                reviewed_at.strftime("%Y-%m-%d %H:%M:%S"),
+                                card["id"],
+                            ),
                         )
                         conn.commit()
 

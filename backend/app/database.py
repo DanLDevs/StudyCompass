@@ -168,3 +168,18 @@ def init_db():
 
     conn.commit()
     conn.close()
+
+def get_active_exam_alerts(conn):
+    """
+    Fetches exams scheduled for today or in the future.
+    Past exams are excluded at the query level.
+    """
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT e.id, e.exam_name, e.exam_date, c.name as course_name
+        FROM exams e
+        JOIN courses c ON e.course_id = c.id
+        WHERE date(e.exam_date) >= date('now', 'localtime')
+        ORDER BY date(e.exam_date) ASC
+    """)
+    return cursor.fetchall()

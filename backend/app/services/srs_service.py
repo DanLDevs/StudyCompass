@@ -1,5 +1,6 @@
 from collections.abc import Sequence
 from datetime import datetime, timedelta
+import math
 
 
 CURRENT_LIMIT_MIGRATION_VERSION = 2
@@ -130,11 +131,25 @@ def get_review_counts(connection, course_id: int | None, now: datetime | None = 
         "reviewed_today": reviewed,
     }
 
-def calculate_sm2(grade: int, repetitions: int, ease_factor: float, interval: int):
+def calculate_sm2(
+    grade: int,
+    repetitions: int,
+    ease_factor: float,
+    interval: int,
+    now: datetime | None = None,
+):
     """
     grade: 1 (Again), 2 (Hard), 3 (Good), 4 (Easy)
     Returns: (new_reptitions, new_ease_factor, new_interval, next_due_date)
     """
+    grade = min(4, max(1, int(grade)))
+    repetitions = max(0, int(repetitions))
+    interval = max(0, int(interval))
+    ease_factor = float(ease_factor)
+    if not math.isfinite(ease_factor):
+        ease_factor = 2.5
+    ease_factor = max(1.3, ease_factor)
+
     # Grade 1 (Again): Fail / Reset
     if grade == 1:
         new_reps = 0
@@ -143,16 +158,26 @@ def calculate_sm2(grade: int, repetitions: int, ease_factor: float, interval: in
     else:
         # Grade 2 (Hard), 3 (Good), 4 (Easy)
         if repetitions == 0:
-            new_interval = 1
+            intervals = {2: 1, 3: 2, 4: 4}
+            new_interval = intervals[grade]
         elif repetitions == 1:
-            new_interval = 3 if grade == 2 else 6
+            hard_interval = max(2, round(interval * 1.2))
+            good_interval = max(hard_interval + 1, round(interval * ease_factor))
+            easy_interval = max(good_interval + 1, round(interval * ease_factor * 1.3))
+            new_interval = {
+                2: hard_interval,
+                3: good_interval,
+                4: easy_interval,
+            }[grade]
         else:
-            multiplier = ease_factor
-            if grade == 2: # Hard gives smaller boost
-                multiplier = 1.2
-            elif grade == 4: # Easy gives extra bonus
-                multiplier = ease_factor * 1.3
-            new_interval = int(round(interval * multiplier))
+            hard_interval = max(interval + 1, round(interval * 1.2))
+            good_interval = max(hard_interval + 1, round(interval * ease_factor))
+            easy_interval = max(good_interval + 1, round(interval * ease_factor * 1.3))
+            new_interval = {
+                2: hard_interval,
+                3: good_interval,
+                4: easy_interval,
+            }[grade]
 
         new_reps = repetitions + 1
 
@@ -161,5 +186,5 @@ def calculate_sm2(grade: int, repetitions: int, ease_factor: float, interval: in
         new_ef = ease_factor + (0.1 - (5 - sm2_grade) * (0.08 + (5 - sm2_grade) * 0.02))
         new_ef = max(1.3, new_ef)  # Ensure EF doesn't drop below 1.3
 
-    next_due = datetime.now() + timedelta(days=new_interval)
+    next_due = (now or datetime.now()) + timedelta(days=new_interval)
     return new_reps, round(new_ef, 2), new_interval, next_due

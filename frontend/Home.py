@@ -15,8 +15,9 @@ if str(BACKEND_DIR) not in sys.path:
 
 import streamlit as st
 import pandas as pd
-from backend.app.database import get_connection, init_db
+from backend.app.database import get_connection, init_db, get_active_exam_alerts
 from backend.app.services.recommendation_service import get_prioritized_topic
+from backend.app.services.srs_service import get_review_counts
 
 init_db()
 conn = get_connection()
@@ -32,31 +33,49 @@ if not courses:
     st.info("👋 Welcome! You haven't added any courses yet. Head to the **Courses** page in the sidebar to get started.")
     st.stop()
 
-# Section 1
-st.subheader("📅 Urgent Exam Radar")
-upcoming_exams = conn.execute("""
-    SELECT e.exam_name, e.exam_date, c.name AS course_name
-    FROM exams e
-    JOIN courses c ON e.course_id = c.id
-    ORDER BY e.exam_date ASC
-""").fetchall()
+st.subheader("🎴 Flashcard Review")
+review_counts = get_review_counts(conn, course_id=None)
 
-if upcoming_exams:
-    cols = st.columns(min(len(upcoming_exams), 3))
-    for idx, exam in enumerate(upcoming_exams[:3]):  # Show only the next 3 exams
-        days_left = (datetime.strptime(exam['exam_date'], "%Y-%m-%d").date() - date.today()).days
-        with cols[idx]:
-            with st.container(border=True):
-                st.markdown(f"**{exam['course_name']}**")
-                st.write(f"🎯 {exam['exam_name']}")
-                if days_left <= 3:
-                    st.error(f"⏰ **{days_left} days left! Critical crunch time!**")
-                elif days_left <= 7:
-                    st.warning(f"📅 **{days_left} days left**")
-                else:
-                    st.info(f"📅 **{days_left} days left**")
+count_col1, count_col2, count_col3, count_col4 = st.columns(4)
+count_col1.metric("Due cards", review_counts["due"])
+count_col2.metric("New cards", review_counts["new"])
+count_col3.metric("Scheduled later", review_counts["scheduled"])
+count_col4.metric("Reviewed today", review_counts["reviewed_today"])
+
+if review_counts["due"] or review_counts["new"]:
+    st.page_link(
+        "pages/1_Courses.py",
+        label=f"Review {review_counts['due'] + review_counts['new']} cards",
+        icon="🎴",
+    )
 else:
-    st.caption("No upcoming exams found. Add deadlines on the **Calendar** page.")
+    st.success("No flashcards are due right now. Your next scheduled cards are still in the future.")
+
+st.divider()
+
+# Section 1
+st.subheader("🔔 Upcoming Exam Alerts")
+active_exams = get_active_exam_alerts(conn)
+
+if not active_exams:
+    st.info("🎉 No upcoming exams scheduled! All previous exams have passed.")
+else:
+    today = date.today()
+    for exam_id, exam_name, exam_date_str, course_name in active_exams:
+        exam_date = datetime.strptime(exam_date_str, "%Y-%m-%d").date()
+        days_left = (exam_date - today).days
+
+        if days_left == 0:
+            badge = "🔥 **TODAY**"
+            alert_box = st.error
+        elif days_left <= 3:
+            badge = f"⚠️ **In {days_left} days**"
+            alert_box = st.warning
+        else:
+            badge = f"📅 **In {days_left} days**"
+            alert_box = st.info
+
+        alert_box(f"{badge}: **{course_name}** - *{exam_name}* ({exam_date_str})")
 
 st.divider()
 
