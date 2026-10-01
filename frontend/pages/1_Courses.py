@@ -1,8 +1,10 @@
 import sys
 import hashlib
+from html import escape
 import json
 from pathlib import Path
 import random
+from datetime import datetime
 
 # Resolve project root ('Study Compass') from 'frontend/pages/'
 ROOT_DIR = Path(__file__).resolve().parent.parent.parent
@@ -36,7 +38,13 @@ from backend.app.services.cheat_sheet_service import (
     render_markdown,
     render_pdf,
 )
-from backend.app.services.srs_service import calculate_sm2
+from backend.app.services.srs_service import (
+    calculate_sm2,
+    get_review_counts,
+    get_review_queue,
+    normalize_review_limits,
+    upsert_flashcards,
+)
 from backend.app.services.recommendation_service import get_prioritized_topic
 
 init_db()
@@ -134,6 +142,8 @@ session_defaults = {
     "course_text": "",
     "document_id": None,
     "practice_package": None,
+    "practice_quiz_submitted": False,
+    "practice_quiz_answers": {},
     "cheat_sheet_markdown": None,
     "cheat_sheet_pdf": None,
     "card_flipped": False,
@@ -141,6 +151,15 @@ session_defaults = {
     "current_course_id": None,
     "srs_queue": None,
     "srs_completed": False,
+    "srs_queue_scope": None,
+    "srs_queue_settings": None,
+    "srs_queue_package_signature": None,
+    "srs_session_started": False,
+    "srs_cards_reviewed": 0,
+    "srs_scope": "This Course",
+    "srs_new_limit": 10,
+    "srs_review_limit": 10,
+    "srs_limit_migration_version": 0,
     "pending_assessment": None,
     "reviewing_corrections": False
 }
@@ -148,25 +167,35 @@ for key, default in session_defaults.items():
     if key not in st.session_state:
         st.session_state[key] = default
 
+(
+    st.session_state.srs_new_limit,
+    st.session_state.srs_review_limit,
+    st.session_state.srs_limit_migration_version,
+) = normalize_review_limits(
+    st.session_state.srs_new_limit,
+    st.session_state.srs_review_limit,
+    st.session_state.srs_limit_migration_version,
+)
+
 st.title("📚 Courses Workspace")
 
 # Ensure default model is set in session state
 if "selected_model" not in st.session_state:
-    st.session_state.selected_model = "gemini-3.5-flash"
+    st.session_state.selected_model = "gemini-3.5-flash-lite"
 
 # UI selector for LLM model in sidebar
 with st.sidebar.expander("⚡ Model Selection", expanded=False):
     model_display_options = {
-        "gemini-3.5-flash": "Gemini 3.5 Flash (Recommended)",
-        "gemini-3.5-flash-lite": "Gemini 3.5 Flash-Lite (Fast & Cost-Efficient)"
+        "gemini-3.5-flash-lite": "Gemini 3.5 Flash-Lite (Recommended)",
+        "gemini-3.5-flash": "Gemini 3.5 Flash (Backup)"
     }
 
     selected_model = st.selectbox(
         "Active LLM Model",
         options=list(model_display_options.keys()),
         format_func=lambda k: model_display_options[k],
-        index=0 if st.session_state.selected_model == "gemini-3.5-flash" else 1,
-        help="Switch to Flash-Lite if you encounter 429 rate limits or need faster card generation."
+        index=0 if st.session_state.selected_model == "gemini-3.5-flash-lite" else 1,
+        help="Switch to Flash if Flash-Lite encounters 429 rate limits or needs a backup model."
     )
     st.session_state.selected_model = selected_model
 
@@ -193,10 +222,17 @@ if active_course_id != st.session_state.current_course_id:
     st.session_state.pending_assessment = None
     st.session_state.reviewing_corrections = False
     st.session_state.practice_package = None
+    st.session_state.practice_quiz_submitted = False
+    st.session_state.practice_quiz_answers = {}
     st.session_state.cheat_sheet_markdown = None
     st.session_state.cheat_sheet_pdf = None
     st.session_state.srs_queue = None
     st.session_state.srs_completed = None
+    st.session_state.srs_queue_scope = None
+    st.session_state.srs_queue_settings = None
+    st.session_state.srs_queue_package_signature = None
+    st.session_state.srs_session_started = False
+    st.session_state.srs_cards_reviewed = 0
 
     if active_course_id:
         latest_document = conn.execute(
@@ -255,6 +291,8 @@ with st.sidebar.expander("⚙️ Manage Course"):
                 st.session_state.assessment = None
                 st.session_state.reviewing_corrections = False
                 st.session_state.practice_package = None
+                st.session_state.practice_quiz_submitted = False
+                st.session_state.practice_quiz_answers = {}
                 st.rerun()
         with col2:
             if st.button("Cancel", use_container_width=True):
@@ -324,7 +362,7 @@ if uploaded_file and st.button("Analyze Notes & Prepare Assessment"):
             assessment = generate_assessment_from_chunks(
                 chunks,
                 check_correctness=check_errors, 
-                model_name=st.session_state.get("selected_model", "gemini-3.5-flash")
+                model_name=st.session_state.get("selected_model", "gemini-3.5-flash-lite")
             )
         except Exception as e:
             e_str = str(e).upper()
@@ -366,6 +404,8 @@ if uploaded_file and st.button("Analyze Notes & Prepare Assessment"):
 
         st.session_state.quiz_submitted = False
         st.session_state.practice_package = None
+        st.session_state.practice_quiz_submitted = False
+        st.session_state.practice_quiz_answers = {}
         st.rerun()
 
 # Interactive Decision Gate for Detected Misconceptions
@@ -536,12 +576,25 @@ if st.session_state.quiz_submitted and st.session_state.mastery:
                     ),
                     model_name=st.session_state.selected_model
                 )
+                upsert_flashcards(
+                    conn,
+                    active_course_id,
+                    weakest_topic,
+                    st.session_state.practice_package.flashcards,
+                )
+                st.session_state.practice_quiz_submitted = False
+                st.session_state.practice_quiz_answers = {}
                 # Scramble definitions once upon generation
                 defs = [p.definition for p in st.session_state.practice_package.matching_pairs]
                 random.shuffle(defs)
                 st.session_state.scrambled_defs = defs       
                 st.session_state.srs_queue = None
                 st.session_state.srs_completed = False     
+                st.session_state.srs_queue_scope = None
+                st.session_state.srs_queue_settings = None
+                st.session_state.srs_queue_package_signature = None
+                st.session_state.srs_session_started = False
+                st.session_state.srs_cards_reviewed = 0
                 st.rerun()
 
 
@@ -648,35 +701,138 @@ if st.session_state.practice_package:
     ])
 
     with tab_mcq:
-        with st.form("mcq_form"):
-            answers = {}
+        if not st.session_state.practice_quiz_submitted:
+            with st.form("mcq_form"):
+                answers = {}
+                for idx, q in enumerate(pkg.multiple_choice):
+                    st.write(f"**Q{idx + 1}: {q.question_text}**")
+                    answers[idx] = st.radio(
+                        f"Options for Q{idx+1}",
+                        q.options,
+                        key=f"drill_q{idx}",
+                        label_visibility="collapsed",
+                    )
+
+                if st.form_submit_button("Submit Quiz & Update Mastery"):
+                    selected_indexes = {
+                        idx: q.options.index(answers[idx])
+                        for idx, q in enumerate(pkg.multiple_choice)
+                    }
+                    correct = sum(
+                        selected_indexes[idx] == q.correct_option_index
+                        for idx, q in enumerate(pkg.multiple_choice)
+                    )
+                    score = correct / len(pkg.multiple_choice)
+                    prev = st.session_state.mastery.get(pkg.topic, 0.5)
+                    new_score = round((prev * 0.4) + (score * 0.6), 2)
+
+                    conn.execute("""
+                        INSERT INTO topic_mastery (course_id, topic_name, mastery_score)
+                        VALUES (?, ?, ?)
+                        ON CONFLICT(course_id, topic_name) DO UPDATE SET mastery_score = excluded.mastery_score
+                    """, (active_course_id, pkg.topic, new_score))
+                    conn.commit()
+
+                    st.session_state.mastery[pkg.topic] = new_score
+                    st.session_state.practice_quiz_answers = selected_indexes
+                    st.session_state.practice_quiz_submitted = True
+                    st.toast(f"Mastery on {pkg.topic} recalibrated to {int(new_score * 100)}%!", icon="📈")
+                    st.rerun()
+        else:
+            selected_indexes = st.session_state.practice_quiz_answers
+            correct = sum(
+                selected_indexes.get(idx) == q.correct_option_index
+                for idx, q in enumerate(pkg.multiple_choice)
+            )
+            st.success(f"You got {correct} of {len(pkg.multiple_choice)} questions correct.")
+
             for idx, q in enumerate(pkg.multiple_choice):
+                selected_index = selected_indexes.get(idx)
+                is_correct = selected_index == q.correct_option_index
                 st.write(f"**Q{idx + 1}: {q.question_text}**")
-                answers[idx] = st.radio(f"Options for Q{idx+1}", q.options, key=f"drill_q{idx}", label_visibility="collapsed")
 
-            if st.form_submit_button("Submit Quiz & Update Mastery"):
-                correct = sum(
-                    1 for idx, q in enumerate(pkg.multiple_choice)
-                    if q.options.index(answers[idx]) == q.correct_option_index
-                )
-                score = correct / len(pkg.multiple_choice)
-                prev = st.session_state.mastery.get(pkg.topic, 0.5)
-                new_score = round((prev * 0.4) + (score * 0.6), 2)
+                for option_idx, option in enumerate(q.options):
+                    if option_idx == q.correct_option_index:
+                        background = "#dcfce7"
+                        border = "#15803d"
+                        text_color = "#14532d"
+                        label = "Correct answer"
+                    elif option_idx == selected_index:
+                        background = "#fee2e2"
+                        border = "#b91c1c"
+                        text_color = "#7f1d1d"
+                        label = "Your answer"
+                    else:
+                        background = "#f8fafc"
+                        border = "#94a3b8"
+                        text_color = "#1e293b"
+                        label = ""
 
-                # Persist the updated mastery score to the database
-                conn.execute("""
-                    INSERT INTO topic_mastery (course_id, topic_name, mastery_score)
-                    VALUES (?, ?, ?)
-                    ON CONFLICT(course_id, topic_name) DO UPDATE SET mastery_score = excluded.mastery_score
-                """, (active_course_id, pkg.topic, new_score))
-                conn.commit()
+                    label_html = f' <small style="font-weight:700;">{label}</small>' if label else ""
+                    st.markdown(
+                        f'<div style="background:{background}; border:2px solid {border}; color:{text_color}; border-radius:4px; padding:0.45rem 0.7rem; margin:0.25rem 0; font-weight:600;">{escape(option)}{label_html}</div>',
+                        unsafe_allow_html=True,
+                    )
 
-                st.session_state.mastery[pkg.topic] = new_score
-                st.toast(f"Mastery on {pkg.topic} recalibrated to {int(new_score * 100)}%!", icon="📈")
+                if not is_correct:
+                    explanation = q.explanation or "Review the correct answer and compare it with the concept in your study material."
+                    st.info(f"**Why this matters:** {explanation}")
+
+            if st.button("Retry Target Quiz", key="retry_practice_quiz"):
+                st.session_state.practice_quiz_submitted = False
+                st.session_state.practice_quiz_answers = {}
                 st.rerun()
 
     with tab_cards:
-        cards = pkg.flashcards
+        upsert_flashcards(
+            conn,
+            active_course_id,
+            pkg.topic,
+            pkg.flashcards,
+        )
+        review_scope = st.selectbox(
+            "Review scope",
+            ["This Course", "All Courses"],
+            key="srs_scope",
+        )
+        scope_course_id = active_course_id if review_scope == "This Course" else None
+        settings_col1, settings_col2 = st.columns(2)
+        with settings_col1:
+            review_limit = st.number_input(
+                "Daily review limit",
+                min_value=0,
+                max_value=100,
+                step=1,
+                key="srs_review_limit",
+            )
+        with settings_col2:
+            new_limit = st.number_input(
+                "Daily new-card limit",
+                min_value=0,
+                max_value=50,
+                step=1,
+                key="srs_new_limit",
+            )
+
+        queue_settings = (review_scope, review_limit, new_limit)
+        package_signature = tuple(
+            (card.front, card.back)
+            for card in pkg.flashcards
+        )
+        if (
+            st.session_state.srs_queue_scope != review_scope
+            or st.session_state.srs_queue_settings != queue_settings
+            or st.session_state.srs_queue_package_signature != package_signature
+        ):
+            st.session_state.srs_queue = None
+            st.session_state.srs_completed = False
+            st.session_state.srs_queue_scope = review_scope
+            st.session_state.srs_queue_settings = queue_settings
+            st.session_state.srs_queue_package_signature = package_signature
+            st.session_state.srs_session_started = False
+            st.session_state.srs_cards_reviewed = 0
+            st.session_state.card_flipped = False
+
         components.html("""
             <script>
             const doc = window.parent.document;
@@ -685,7 +841,7 @@ if st.session_state.practice_package:
                 if (['INPUT', 'TEXTAREA'].includes(doc.activeElement.tagName)) return;
                 
                 let buttonText = null;
-                if (e.code === 'Space') {
+                if (e.code === 'Space' || e.key === 'Enter') {
                     buttonText = 'Flip Card';
                 } else if (e.key === '1') {
                     buttonText = '1 - Again';
@@ -709,64 +865,120 @@ if st.session_state.practice_package:
             </script>
         """, height=0, width=0)
 
-        if st.session_state.srs_queue is None and not st.session_state.srs_completed:
-            st.session_state.srs_queue = list(range(len(cards)))
-            st.session_state.card_flipped = False
+        counts = get_review_counts(conn, scope_course_id)
+        should_reload_empty_queue = (
+            not st.session_state.srs_session_started
+            and not st.session_state.srs_queue
+            and (counts["due"] > 0 or counts["new"] > 0)
+        )
 
-        if st.session_state.srs_completed or (st.session_state.srs_queue is not None and len(st.session_state.srs_queue) == 0):
+        if st.session_state.srs_queue is None or should_reload_empty_queue:
+            st.session_state.srs_queue = get_review_queue(
+                conn,
+                scope_course_id,
+                review_limit,
+                new_limit,
+            )
+            st.session_state.srs_session_started = bool(st.session_state.srs_queue)
+            st.session_state.srs_cards_reviewed = 0
+            st.session_state.srs_completed = False
+            st.session_state.card_flipped = False
+        elif (
+            st.session_state.srs_session_started
+            and st.session_state.srs_cards_reviewed > 0
+            and not st.session_state.srs_queue
+        ):
             st.session_state.srs_completed = True
-            st.balloons()
-            st.success("🎉 You have reviewed all cards for this session!")
+
+        progress_col1, progress_col2, progress_col3 = st.columns(3)
+        progress_col1.metric("Due cards", counts["due"])
+        progress_col2.metric("New cards", counts["new"])
+        progress_col3.metric("Reviewed today", counts["reviewed_today"])
+
+        if st.session_state.srs_completed:
+            st.success("🎉 You have completed this review session!")
             if st.button("Restart Session"):
-                st.session_state.srs_queue = list(range(len(cards)))
+                st.session_state.srs_queue = None
+                st.session_state.srs_completed = False
+                st.session_state.srs_session_started = False
+                st.session_state.srs_cards_reviewed = 0
+                st.session_state.card_flipped = False
+                st.rerun()
+        elif not st.session_state.srs_queue:
+            if review_limit == 0 and new_limit == 0:
+                st.warning("Set a daily review or new-card limit above zero to load flashcards.")
+            elif counts["due"] == 0 and counts["new"] == 0 and counts["scheduled"] > 0:
+                st.info("No cards are due right now. Your next scheduled cards are still in the future.")
+            elif counts["due"] == 0 and counts["new"] == 0:
+                st.info("No new or due flashcards are available right now.")
+            else:
+                st.warning("No cards were loaded for the current limits. Increase the applicable daily limit.")
+            if st.button("Restart Session"):
+                st.session_state.srs_queue = None
                 st.session_state.card_flipped = False
                 st.session_state.srs_completed = False
+                st.session_state.srs_session_started = False
+                st.session_state.srs_cards_reviewed = 0
                 st.rerun()
         else:
-            card = cards[st.session_state.srs_queue[0]]
+            card = st.session_state.srs_queue[0]
             st.caption(f"Remaining in queue: **{len(st.session_state.srs_queue)}**")
+            if review_scope == "All Courses":
+                st.caption(f"Course: **{card['course_name']}** · Topic: **{card['topic_name']}**")
 
             with st.container(border=True):
                 if not st.session_state.card_flipped:
-                    st.markdown(f"### ❓ {card.front}")
-                    st.caption("Press **Space** or click below to reveal answer.")
-                    if st.button("🔄 Flip Card (Space)", use_container_width=True):
+                    st.markdown(f"### ❓ {card['front']}")
+                    st.caption("Press **Space** or **Enter**, or click below to reveal the answer.")
+                    if st.button("🔄 Press Space or Enter to Flip Card", use_container_width=True):
                         st.session_state.card_flipped = True
                         st.rerun()
                 else:
-                    st.markdown(f"### 💡 {card.back}")
-                    st.caption(f"Term: {card.front}")
+                    st.markdown(f"### 💡 {card['back']}")
+                    st.caption(f"Term: {card['front']}")
                     st.divider()
 
                     cols = st.columns(4)
                     def record(grade):
                         row = conn.execute(
-                            "SELECT repetitions, ease_factor, interval FROM flashcards WHERE course_id = ? AND front = ?",
-                            (active_course_id, card.front)
+                            "SELECT repetitions, ease_factor, interval FROM flashcards WHERE id = ?",
+                            (card["id"],)
                         ).fetchone()
                         reps = row["repetitions"] if row else 0
                         ef = row["ease_factor"] if row else 2.5
                         interval = row["interval"] if row else 0
+                        reviewed_at = datetime.now()
 
-                        # Calculate next SM-2 interval 
-                        new_reps, new_ef, new_interval, next_due = calculate_sm2(grade, reps, ef, interval)
-    
-                        # Persist to SQLite
-                        conn.execute("""
-                            INSERT INTO flashcards (course_id, topic_name, front, back, interval, repetitions, ease_factor, due_date)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                            ON CONFLICT(course_id, front) DO UPDATE SET
-                                interval = excluded.interval,
-                                repetitions = excluded.repetitions,
-                                ease_factor = excluded.ease_factor,
-                                due_date = excluded.due_date
-                        """, (active_course_id, pkg.topic, card.front, card.back, new_interval, new_reps, new_ef, next_due))
+                        new_reps, new_ef, new_interval, next_due = calculate_sm2(
+                            grade,
+                            reps,
+                            ef,
+                            interval,
+                            now=reviewed_at,
+                        )
+
+                        conn.execute(
+                            """
+                            UPDATE flashcards
+                            SET interval = ?, repetitions = ?, ease_factor = ?,
+                                due_date = ?, last_reviewed_at = ?
+                            WHERE id = ?
+                            """,
+                            (
+                                new_interval,
+                                new_reps,
+                                new_ef,
+                                next_due,
+                                reviewed_at.strftime("%Y-%m-%d %H:%M:%S"),
+                                card["id"],
+                            ),
+                        )
                         conn.commit()
 
-                        # If "Again" (1), push card to the end of the current session queue
-                        finished_idx = st.session_state.srs_queue.pop(0)
+                        st.session_state.srs_cards_reviewed += 1
+                        finished_card = st.session_state.srs_queue.pop(0)
                         if grade == 1:
-                            st.session_state.srs_queue.append(finished_idx)  # Re-add to end of queue
+                            st.session_state.srs_queue.append(finished_card)
     
                         st.session_state.card_flipped = False
                         st.rerun()

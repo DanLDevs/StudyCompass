@@ -6,6 +6,7 @@ DB_PATH = Path(__file__).resolve().parent.parent.parent.parent / "study_compass.
 def get_connection():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
     return conn
 
 def init_db():
@@ -133,9 +134,25 @@ def init_db():
             repetitions INTEGER DEFAULT 0,
             ease_factor REAL DEFAULT 2.5,
             due_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            last_reviewed_at TIMESTAMP,
             UNIQUE(course_id, front),
             FOREIGN KEY (course_id) REFERENCES courses (id) ON DELETE CASCADE
         );
+    """)
+
+    flashcard_columns = {
+        row[1] for row in cursor.execute("PRAGMA table_info(flashcards)")
+    }
+    if "last_reviewed_at" not in flashcard_columns:
+        cursor.execute("ALTER TABLE flashcards ADD COLUMN last_reviewed_at TIMESTAMP")
+
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_flashcards_course_due
+        ON flashcards (course_id, due_date)
+    """)
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_flashcards_due
+        ON flashcards (due_date)
     """)
 
     cursor.execute("""
@@ -151,3 +168,18 @@ def init_db():
 
     conn.commit()
     conn.close()
+
+def get_active_exam_alerts(conn):
+    """
+    Fetches exams scheduled for today or in the future.
+    Past exams are excluded at the query level.
+    """
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT e.id, e.exam_name, e.exam_date, c.name as course_name
+        FROM exams e
+        JOIN courses c ON e.course_id = c.id
+        WHERE date(e.exam_date) >= date('now', 'localtime')
+        ORDER BY date(e.exam_date) ASC
+    """)
+    return cursor.fetchall()
