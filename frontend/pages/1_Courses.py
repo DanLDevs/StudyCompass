@@ -714,6 +714,10 @@ if st.session_state.practice_package:
                     )
 
                 if st.form_submit_button("Submit Quiz & Update Mastery"):
+                    if not pkg.multiple_choice:
+                        st.warning("No valid multiple-choice questions were generated. Please retry the Practice Hub.")
+                        st.stop()
+
                     selected_indexes = {
                         idx: q.options.index(answers[idx])
                         for idx, q in enumerate(pkg.multiple_choice)
