@@ -767,9 +767,9 @@ if st.session_state.practice_package:
                         text_color = "#7f1d1d"
                         label = "Your answer"
                     else:
-                        background = "#f8fafc"
-                        border = "#94a3b8"
-                        text_color = "#1e293b"
+                        background = "transparent"
+                        border = "#e2e8f0"
+                        text_color = "#334155"
                         label = ""
 
                     label_html = f' <small style="font-weight:700;">{label}</small>' if label else ""
