@@ -42,12 +42,40 @@ count_col2.metric("New cards", review_counts["new"])
 count_col3.metric("Scheduled later", review_counts["scheduled"])
 count_col4.metric("Reviewed today", review_counts["reviewed_today"])
 
+course_review_options = []
+for course in courses:
+    course_counts = get_review_counts(conn, course["id"])
+    total_ready = course_counts["due"] + course_counts["new"]
+    course_review_options.append((course["id"], course["name"], total_ready))
+
 if review_counts["due"] or review_counts["new"]:
-    st.page_link(
-        "pages/1_Courses.py",
-        label=f"Review {review_counts['due'] + review_counts['new']} cards",
-        icon="🎴",
-    )
+    if len(course_review_options) == 1:
+        selected_course_id, _, selected_total = course_review_options[0]
+        if st.button(f"Review {selected_total} cards", icon="🎴", use_container_width=True):
+            st.session_state.launch_review_course_id = selected_course_id
+            st.session_state.launch_review_scope = "This Course"
+            st.session_state.launch_review_limit = 10
+            st.session_state.launch_review_new_limit = 10
+            st.session_state.current_course_id = selected_course_id
+            st.switch_page("pages/1_Courses.py")
+    else:
+        options = [
+            f"{name} ({total_ready} ready)"
+            for _, name, total_ready in course_review_options
+        ]
+        selected_label = st.selectbox("Choose a course to review", options)
+        selected_course_id = next(
+            course_id
+            for course_id, name, total_ready in course_review_options
+            if selected_label == f"{name} ({total_ready} ready)"
+        )
+        if st.button("Review selected course", icon="🎴", use_container_width=True):
+            st.session_state.launch_review_course_id = selected_course_id
+            st.session_state.launch_review_scope = "This Course"
+            st.session_state.launch_review_limit = 10
+            st.session_state.launch_review_new_limit = 10
+            st.session_state.current_course_id = selected_course_id
+            st.switch_page("pages/1_Courses.py")
 else:
     st.success("No flashcards are due right now. Your next scheduled cards are still in the future.")
 

@@ -53,6 +53,41 @@ conn = get_connection()
 st.set_page_config(page_title="StudyCompass | Courses", layout="wide")
 
 
+def render_review_shortcuts():
+    components.html(
+        """
+        <script>
+        const doc = window.parent.document;
+        if (!doc.__studyCompassReviewShortcutsInstalled) {
+            doc.__studyCompassReviewShortcutsInstalled = true;
+            doc.addEventListener('keydown', function(e) {
+                const activeTag = doc.activeElement?.tagName;
+                if (['INPUT', 'TEXTAREA', 'SELECT'].includes(activeTag)) return;
+
+                let buttonText = null;
+                if (e.code === 'Space' || e.key === 'Enter') {
+                    buttonText = 'Flip Card';
+                } else if (['1', '2', '3', '4'].includes(e.key)) {
+                    buttonText = `${e.key} - `;
+                }
+
+                if (buttonText) {
+                    const target = Array.from(doc.querySelectorAll('button'))
+                        .find(button => button.innerText.includes(buttonText));
+                    if (target) {
+                        target.click();
+                        e.preventDefault();
+                    }
+                }
+            });
+        }
+        </script>
+        """,
+        height=0,
+        width=0,
+    )
+
+
 def extract_uploaded_text(uploaded_file) -> str:
     # Extract readable text from a supported study-material file.
     file_type = Path(uploaded_file.name).suffix.lower()
@@ -144,6 +179,10 @@ session_defaults = {
     "practice_package": None,
     "practice_quiz_submitted": False,
     "practice_quiz_answers": {},
+    "launch_review_course_id": None,
+    "launch_review_scope": "This Course",
+    "launch_review_limit": 10,
+    "launch_review_new_limit": 10,
     "cheat_sheet_markdown": None,
     "cheat_sheet_pdf": None,
     "card_flipped": False,
@@ -161,7 +200,12 @@ session_defaults = {
     "srs_review_limit": 10,
     "srs_limit_migration_version": 0,
     "pending_assessment": None,
-    "reviewing_corrections": False
+    "reviewing_corrections": False,
+    "review_active": False,
+    "review_course_id": None,
+    "review_scope": "This Course",
+    "review_limit": 10,
+    "review_new_limit": 10,
 }
 for key, default in session_defaults.items():
     if key not in st.session_state:
@@ -203,7 +247,32 @@ with st.sidebar.expander("⚡ Model Selection", expanded=False):
 courses = conn.execute("SELECT id, name FROM courses ORDER BY name").fetchall()
 course_names = [c["name"] for c in courses]
 
-selected_course_name = st.sidebar.selectbox("Select Active Course", ["+ Add New Course"] + course_names)
+pending_review_course_id = st.session_state.get("launch_review_course_id")
+review_course_id = (
+    st.session_state.get("review_course_id")
+    or pending_review_course_id
+    or st.session_state.get("current_course_id")
+)
+
+if review_course_id is not None:
+    st.session_state.current_course_id = review_course_id
+    matching_course_name = next(
+        (c["name"] for c in courses if c["id"] == review_course_id),
+        None,
+    )
+    default_course_index = (
+        1 + course_names.index(matching_course_name)
+        if matching_course_name is not None
+        else 0
+    )
+else:
+    default_course_index = 0
+
+selected_course_name = st.sidebar.selectbox(
+    "Select Active Course",
+    ["+ Add New Course"] + course_names,
+    index=default_course_index,
+)
 
 if selected_course_name == "+ Add New Course":
     new_course = st.sidebar.text_input("Enter New Course Name")
@@ -595,6 +664,8 @@ if st.session_state.quiz_submitted and st.session_state.mastery:
                 st.session_state.srs_queue_package_signature = None
                 st.session_state.srs_session_started = False
                 st.session_state.srs_cards_reviewed = 0
+                st.session_state.review_active = False
+                st.session_state.review_course_id = None
                 st.rerun()
 
 
@@ -687,6 +758,139 @@ if st.session_state.quiz_submitted and st.session_state.mastery:
                     mime="application/pdf",
                     use_container_width=True,
                 )
+
+if st.session_state.get("launch_review_course_id") is not None:
+    st.session_state.review_active = True
+    st.session_state.review_course_id = st.session_state.launch_review_course_id
+    st.session_state.review_scope = st.session_state.launch_review_scope
+    st.session_state.review_limit = st.session_state.launch_review_limit
+    st.session_state.review_new_limit = st.session_state.launch_review_new_limit
+
+    st.session_state.launch_review_course_id = None
+    st.session_state.launch_review_scope = "This Course"
+    st.session_state.launch_review_limit = 10
+    st.session_state.launch_review_new_limit = 10
+
+    st.session_state.srs_queue = None
+    st.session_state.srs_completed = False
+    st.session_state.srs_session_started = False
+    st.session_state.srs_cards_reviewed = 0
+    st.session_state.card_flipped = False
+
+if (
+    st.session_state.get("review_active")
+    and st.session_state.get("review_course_id") is not None
+):
+    render_review_shortcuts()
+    pending_review_course_id = st.session_state.review_course_id
+    pending_review_scope = st.session_state.review_scope
+    pending_review_limit = st.session_state.review_limit
+    pending_review_new_limit = st.session_state.review_new_limit
+
+    st.subheader(f"🎴 Review Session: {next(c['name'] for c in courses if c['id'] == pending_review_course_id)}")
+    review_scope = pending_review_scope
+    scope_course_id = pending_review_course_id if review_scope == "This Course" else None
+    review_limit = pending_review_limit
+    new_limit = pending_review_new_limit
+    queue_settings = (review_scope, review_limit, new_limit)
+    st.session_state.srs_queue_scope = review_scope
+    st.session_state.srs_queue_settings = queue_settings
+
+    counts = get_review_counts(conn, scope_course_id)
+    if st.session_state.srs_queue is None:
+        st.session_state.srs_queue = get_review_queue(
+            conn,
+            scope_course_id,
+            review_limit,
+            new_limit,
+        )
+        st.session_state.srs_session_started = bool(st.session_state.srs_queue)
+        st.session_state.srs_cards_reviewed = 0
+        st.session_state.srs_completed = False
+        st.session_state.card_flipped = False
+
+    if st.session_state.srs_completed:
+        st.success("🎉 You have completed this review session!")
+        if st.button("Return to Dashboard"):
+            st.session_state.review_active = False
+            st.session_state.review_course_id = None
+            st.session_state.current_course_id = None
+            st.switch_page("Home.py")
+    elif not st.session_state.srs_queue:
+        st.info("No cards are due right now for this course. Try again later or review a different course.")
+        if st.button("Return to Dashboard"):
+            st.session_state.review_active = False
+            st.session_state.review_course_id = None
+            st.session_state.current_course_id = None
+            st.switch_page("Home.py")
+    else:
+        card = st.session_state.srs_queue[0]
+        st.caption(f"Remaining in queue: **{len(st.session_state.srs_queue)}**")
+        with st.container(border=True):
+            if not st.session_state.card_flipped:
+                st.markdown(f"### ❓ {card['front']}")
+                st.caption("Press **Space** or **Enter**, or click below to reveal the answer.")
+                if st.button("🔄 Flip Card", use_container_width=True):
+                    st.session_state.card_flipped = True
+                    st.rerun()
+            else:
+                st.markdown(f"### 💡 {card['back']}")
+                st.caption(f"Term: {card['front']}")
+                st.divider()
+                cols = st.columns(4)
+
+                def record_review(grade):
+                    row = conn.execute(
+                        "SELECT repetitions, ease_factor, interval FROM flashcards WHERE id = ?",
+                        (card["id"],)
+                    ).fetchone()
+                    reps = row["repetitions"] if row else 0
+                    ef = row["ease_factor"] if row else 2.5
+                    interval = row["interval"] if row else 0
+                    reviewed_at = datetime.now()
+                    new_reps, new_ef, new_interval, next_due = calculate_sm2(
+                        grade,
+                        reps,
+                        ef,
+                        interval,
+                        now=reviewed_at,
+                    )
+                    conn.execute(
+                        """
+                        UPDATE flashcards
+                        SET interval = ?, repetitions = ?, ease_factor = ?,
+                            due_date = ?, last_reviewed_at = ?
+                        WHERE id = ?
+                        """,
+                        (
+                            new_interval,
+                            new_reps,
+                            new_ef,
+                            next_due,
+                            reviewed_at.strftime("%Y-%m-%d %H:%M:%S"),
+                            card["id"],
+                        ),
+                    )
+                    conn.commit()
+
+                    st.session_state.srs_cards_reviewed += 1
+                    finished_card = st.session_state.srs_queue.pop(0)
+                    if grade == 1:
+                        st.session_state.srs_queue.append(finished_card)
+                    st.session_state.card_flipped = False
+                    st.rerun()
+
+                for g_idx, label in enumerate(["1 - Again", "2 - Hard", "3 - Good", "4 - Easy"], start=1):
+                    with cols[g_idx - 1]:
+                        if st.button(label, use_container_width=True):
+                            record_review(g_idx)
+
+    st.write("---")
+    if st.button("Return to Dashboard"):
+        st.session_state.review_active = False
+        st.session_state.review_course_id = None
+        st.session_state.current_course_id = None
+        st.switch_page("Home.py")
 
 # Practice Hub (MCQ, Flashcards, Matching)
 if st.session_state.practice_package:
@@ -837,37 +1041,7 @@ if st.session_state.practice_package:
             st.session_state.srs_cards_reviewed = 0
             st.session_state.card_flipped = False
 
-        components.html("""
-            <script>
-            const doc = window.parent.document;
-            doc.addEventListener('keydown', function(e) {
-                // Ignore if user is typing in a real text input
-                if (['INPUT', 'TEXTAREA'].includes(doc.activeElement.tagName)) return;
-                
-                let buttonText = null;
-                if (e.code === 'Space' || e.key === 'Enter') {
-                    buttonText = 'Flip Card';
-                } else if (e.key === '1') {
-                    buttonText = '1 - Again';
-                } else if (e.key === '2') {
-                    buttonText = '2 - Hard';
-                } else if (e.key === '3') {
-                    buttonText = '3 - Good';
-                } else if (e.key === '4') {
-                    buttonText = '4 - Easy';
-                }
-
-                if (buttonText) {
-                    const buttons = Array.from(doc.querySelectorAll('button'));
-                    const target = buttons.find(b => b.innerText.includes(buttonText));
-                    if (target) {
-                        target.click();
-                        e.preventDefault();
-                    }
-                }
-            });
-            </script>
-        """, height=0, width=0)
+        render_review_shortcuts()
 
         counts = get_review_counts(conn, scope_course_id)
         should_reload_empty_queue = (
