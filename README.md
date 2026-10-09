@@ -1,18 +1,16 @@
 # StudyCompass
 
-StudyCompass is a Streamlit study-planning application that helps students organize courses, track exam deadlines, measure topic mastery, and focus their study time. It uses the Gemini API to analyze uploaded study materials and generate personalized assessments and practice activities.
+StudyCompass is a Streamlit study-planning app for organizing courses and exams, measuring topic mastery, and guiding practice with uploaded study materials. The local Streamlit app is configured and runnable. GitHub and Streamlit Community Cloud deployment are not complete.
 
-## Features
+## Current Features
 
-- Create and manage courses.
-- Add exams and deadlines through the Calendar page.
-- Upload TXT, PDF, DOCX, and PPTX study materials.
-- Analyze notes with semantic chunking and generate diagnostic quizzes.
-- Track mastery by topic and receive priority study recommendations.
-- Practice with targeted quizzes, flashcards, spaced repetition, and term matching.
-- Detect possible misconceptions and optionally apply corrections to uploaded notes.
-- Generate personalized cheat sheets containing low-mastery topics and flagged misconceptions.
-- Download cheat sheets as Markdown or PDF files.
+- Course management and a calendar for exams and deadlines.
+- TXT, PDF, DOCX, and PPTX uploads with semantic chunking.
+- AI diagnostic assessment, topic mastery tracking, and study recommendations.
+- Practice hub with multiple-choice questions, flashcards/SRS, term matching, and misconception correction.
+- Cheat sheets with Markdown and PDF downloads.
+- Direct dashboard flashcard review and persistent review-course state across reruns.
+- Keyboard shortcuts intended for `Space`/`Enter` and `1`-`4`.
 
 ## Project Structure
 
@@ -20,13 +18,14 @@ StudyCompass is a Streamlit study-planning application that helps students organ
 StudyCompass1/
 ├── backend/
 │   └── app/
-│       ├── database.py
-│       └── services/
+│       ├── database.py              # SQLite setup and persistence
+│       └── services/                # AI, recommendations, SRS, and cheat sheets
 ├── frontend/
-│   ├── Home.py
+│   ├── Home.py                      # Streamlit entry point and dashboard
 │   └── pages/
 │       ├── 1_Courses.py
 │       └── 2_Calendar.py
+├── tests/
 ├── requirements.txt
 └── README.md
 ```
@@ -34,92 +33,74 @@ StudyCompass1/
 ## Requirements
 
 - Python 3.10 or newer
-- A Gemini API key
-- Windows PowerShell, Command Prompt, or an equivalent terminal
+- A Gemini API key for AI features
+- PowerShell, Command Prompt, or an equivalent terminal
 
-## Installation
+Dependencies are listed in `requirements.txt`.
 
-Open a terminal in the project folder:
+## Local Installation and Configuration
 
-```powershell
-cd "c:\Users\Daniel Lai\OneDrive - St. Louis Community College\Desktop\StudyCompass\StudyCompass1"
-```
-
-Create a virtual environment:
+From the project root, create and activate a virtual environment in Windows PowerShell:
 
 ```powershell
 python -m venv .venv
-```
-
-Activate it in PowerShell:
-
-```powershell
 .\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
 ```
 
-If PowerShell prevents activation, run this once for your user account:
+If PowerShell blocks activation, run this once for your user account, then activate the environment again:
 
 ```powershell
 Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
 ```
 
-Then activate the environment again. A successful activation displays `(.venv)` in the terminal prompt.
-
-Install the project dependencies:
-
-```powershell
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
-```
-
-## Configure the Gemini API
-
-Create a file named `.env` in the project root, next to `requirements.txt`, with this content:
+Create `.env` in the project root, next to `requirements.txt`:
 
 ```env
 GEMINI_API_KEY=your_gemini_api_key_here
 ```
 
-Replace the placeholder with your own key. Do not commit `.env` or share your API key publicly.
+The current code loads this value with `python-dotenv` and `os.getenv("GEMINI_API_KEY")`. In VS Code, select `.venv\Scripts\python.exe` with **Python: Select Interpreter**.
 
-## Start the Application
+## Run Locally
 
-With the virtual environment activated, run:
+With `.venv` activated:
 
 ```powershell
 python -m streamlit run frontend/Home.py
 ```
 
-Streamlit will display a local URL, usually:
+Open the URL shown by Streamlit, usually `http://localhost:8501`. Press `Ctrl+C` in the terminal to stop the app.
+
+For Command Prompt, activate with `.venv\Scripts\activate.bat` and use the same run command.
+
+## Deployment Readiness
+
+For Streamlit Community Cloud, the exact app entry point is:
 
 ```text
-http://localhost:8501
+frontend/Home.py
 ```
 
-Open that URL in a browser. Use the sidebar to navigate between the dashboard, Courses, and Calendar pages.
+The repository must first be pushed to GitHub. Cloud API-key secret handling still needs to be verified or updated: the current implementation reads `GEMINI_API_KEY` through dotenv and `os.getenv` and does not yet document or implement Streamlit Cloud secrets directly. SQLite data is stored in `study_compass.db`, so it will not be durable across hosted restarts or rebuilds. SQLite files are excluded from Git.
 
-To stop the application, return to the terminal and press `Ctrl+C`.
+## Development and Testing
 
-## VS Code Interpreter
+Compile the Python sources without running the app:
 
-In VS Code, press `Ctrl+Shift+P`, select **Python: Select Interpreter**, and choose:
-
-```text
-.venv\Scripts\python.exe
+```powershell
+python -m py_compile frontend/Home.py frontend/pages/1_Courses.py frontend/pages/2_Calendar.py backend/app/database.py
 ```
 
-This ensures that VS Code, Streamlit, and the installed project packages use the same Python environment.
+Run the test suite:
 
-## Command Prompt Alternative
-
-If you are using Command Prompt instead of PowerShell, activate the environment with:
-
-```cmd
-.venv\Scripts\activate.bat
+```powershell
+python -m pytest
 ```
 
-Then start the application using the same Streamlit command:
+## Security Notes
 
-```cmd
-python -m streamlit run frontend/Home.py
-```
+- Never commit `.env`, API keys, or other credentials.
+- Never commit the local `study_compass.db` file or other SQLite database files.
+- `.gitignore` excludes `.env`, virtual environments, caches, and SQLite database files.
