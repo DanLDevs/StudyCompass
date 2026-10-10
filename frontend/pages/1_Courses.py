@@ -55,31 +55,53 @@ st.set_page_config(page_title="StudyCompass | Courses", layout="wide")
 
 def render_review_shortcuts():
     components.html(
-        """
+        r"""
         <script>
-        const doc = window.parent.document;
-        if (!doc.__studyCompassReviewShortcutsInstalled) {
-            doc.__studyCompassReviewShortcutsInstalled = true;
-            doc.addEventListener('keydown', function(e) {
-                const activeTag = doc.activeElement?.tagName;
+        function installShortcutListener(win) {
+            if (!win || win.__studyCompassReviewShortcutsInstalled) return;
+            win.__studyCompassReviewShortcutsInstalled = true;
+
+            win.addEventListener('keydown', function(e) {
+                const doc = win.document || document;
+                const activeTag = (doc.activeElement && doc.activeElement.tagName) || '';
                 if (['INPUT', 'TEXTAREA', 'SELECT'].includes(activeTag)) return;
 
-                let buttonText = null;
-                if (e.code === 'Space' || e.key === 'Enter') {
-                    buttonText = 'Flip Card';
-                } else if (['1', '2', '3', '4'].includes(e.key)) {
-                    buttonText = `${e.key} - `;
+                const normalize = (text) => (text || '').replace(/\s+/g, ' ').trim().toLowerCase();
+                const isSpace = e.code === 'Space' || e.key === ' ' || e.key === 'Spacebar';
+                const isEnter = e.code === 'Enter' || e.key === 'Enter';
+                const gradeMap = {
+                    '1': 'again',
+                    '2': 'hard',
+                    '3': 'good',
+                    '4': 'easy'
+                };
+
+                let target = null;
+                if (isSpace || isEnter) {
+                    const flipText = /flip card|press\s+space\s+or\s+enter/i;
+                    target = Array.from(doc.querySelectorAll('button')).find(button => {
+                        const text = normalize(button.innerText || button.textContent || '');
+                        return flipText.test(text);
+                    });
+                } else if (gradeMap[e.key]) {
+                    const gradeToken = gradeMap[e.key];
+                    target = Array.from(doc.querySelectorAll('button')).find(button => {
+                        const text = normalize(button.innerText || button.textContent || '');
+                        return text.includes(gradeToken) || text.startsWith(`${e.key.toLowerCase()} -`) || text.startsWith(`${e.key} -`);
+                    });
                 }
 
-                if (buttonText) {
-                    const target = Array.from(doc.querySelectorAll('button'))
-                        .find(button => button.innerText.includes(buttonText));
-                    if (target) {
-                        target.click();
-                        e.preventDefault();
-                    }
+                if (target) {
+                    target.click();
+                    e.preventDefault();
+                    e.stopPropagation();
                 }
-            });
+            }, true);
+        }
+
+        installShortcutListener(window);
+        if (window.parent && window.parent !== window) {
+            installShortcutListener(window.parent);
         }
         </script>
         """,
@@ -179,6 +201,8 @@ session_defaults = {
     "practice_package": None,
     "practice_quiz_submitted": False,
     "practice_quiz_answers": {},
+    "matching_submitted": False,
+    "matching_answers": {},
     "launch_review_course_id": None,
     "launch_review_scope": "This Course",
     "launch_review_limit": 10,
@@ -293,6 +317,8 @@ if active_course_id != st.session_state.current_course_id:
     st.session_state.practice_package = None
     st.session_state.practice_quiz_submitted = False
     st.session_state.practice_quiz_answers = {}
+    st.session_state.matching_submitted = False
+    st.session_state.matching_answers = {}
     st.session_state.cheat_sheet_markdown = None
     st.session_state.cheat_sheet_pdf = None
     st.session_state.srs_queue = None
@@ -362,6 +388,8 @@ with st.sidebar.expander("⚙️ Manage Course"):
                 st.session_state.practice_package = None
                 st.session_state.practice_quiz_submitted = False
                 st.session_state.practice_quiz_answers = {}
+                st.session_state.matching_submitted = False
+                st.session_state.matching_answers = {}
                 st.rerun()
         with col2:
             if st.button("Cancel", use_container_width=True):
@@ -653,10 +681,12 @@ if st.session_state.quiz_submitted and st.session_state.mastery:
                 )
                 st.session_state.practice_quiz_submitted = False
                 st.session_state.practice_quiz_answers = {}
+                st.session_state.matching_submitted = False
+                st.session_state.matching_answers = {}
                 # Scramble definitions once upon generation
                 defs = [p.definition for p in st.session_state.practice_package.matching_pairs]
                 random.shuffle(defs)
-                st.session_state.scrambled_defs = defs       
+                st.session_state.scrambled_defs = defs
                 st.session_state.srs_queue = None
                 st.session_state.srs_completed = False     
                 st.session_state.srs_queue_scope = None
@@ -766,6 +796,13 @@ if st.session_state.get("launch_review_course_id") is not None:
     st.session_state.review_limit = st.session_state.launch_review_limit
     st.session_state.review_new_limit = st.session_state.launch_review_new_limit
 
+    st.session_state.practice_package = None
+    st.session_state.practice_quiz_submitted = False
+    st.session_state.practice_quiz_answers = {}
+    st.session_state.matching_submitted = False
+    st.session_state.matching_answers = {}
+    st.session_state.scrambled_defs = []
+
     st.session_state.launch_review_course_id = None
     st.session_state.launch_review_scope = "This Course"
     st.session_state.launch_review_limit = 10
@@ -811,14 +848,14 @@ if (
 
     if st.session_state.srs_completed:
         st.success("🎉 You have completed this review session!")
-        if st.button("Return to Dashboard"):
+        if st.button("Return to Dashboard", key="review_return_dashboard_done"):
             st.session_state.review_active = False
             st.session_state.review_course_id = None
             st.session_state.current_course_id = None
             st.switch_page("Home.py")
     elif not st.session_state.srs_queue:
         st.info("No cards are due right now for this course. Try again later or review a different course.")
-        if st.button("Return to Dashboard"):
+        if st.button("Return to Dashboard", key="review_return_dashboard_empty"):
             st.session_state.review_active = False
             st.session_state.review_course_id = None
             st.session_state.current_course_id = None
@@ -830,7 +867,7 @@ if (
             if not st.session_state.card_flipped:
                 st.markdown(f"### ❓ {card['front']}")
                 st.caption("Press **Space** or **Enter**, or click below to reveal the answer.")
-                if st.button("🔄 Flip Card", use_container_width=True):
+                if st.button("🔄 Flip Card", use_container_width=True, key="review_flip_card"):
                     st.session_state.card_flipped = True
                     st.rerun()
             else:
@@ -882,18 +919,20 @@ if (
 
                 for g_idx, label in enumerate(["1 - Again", "2 - Hard", "3 - Good", "4 - Easy"], start=1):
                     with cols[g_idx - 1]:
-                        if st.button(label, use_container_width=True):
+                        if st.button(label, use_container_width=True, key=f"review_grade_{g_idx}"):
                             record_review(g_idx)
 
     st.write("---")
-    if st.button("Return to Dashboard"):
+    if st.button("Return to Dashboard", key="review_return_dashboard_footer"):
         st.session_state.review_active = False
         st.session_state.review_course_id = None
         st.session_state.current_course_id = None
         st.switch_page("Home.py")
 
 # Practice Hub (MCQ, Flashcards, Matching)
-if st.session_state.practice_package:
+# Keep the Practice Hub hidden while a review session is active so the page does not render
+# both the flashcard review workflow and the Practice Hub at the same time.
+if not st.session_state.get("review_active") and st.session_state.practice_package:
     pkg = st.session_state.practice_package
     st.divider()
     st.subheader(f"🛠️ Practice Hub: {pkg.topic}")
@@ -1075,7 +1114,7 @@ if st.session_state.practice_package:
 
         if st.session_state.srs_completed:
             st.success("🎉 You have completed this review session!")
-            if st.button("Restart Session"):
+            if st.button("Restart Session", key="practice_restart_session_done"):
                 st.session_state.srs_queue = None
                 st.session_state.srs_completed = False
                 st.session_state.srs_session_started = False
@@ -1091,7 +1130,7 @@ if st.session_state.practice_package:
                 st.info("No new or due flashcards are available right now.")
             else:
                 st.warning("No cards were loaded for the current limits. Increase the applicable daily limit.")
-            if st.button("Restart Session"):
+            if st.button("Restart Session", key="practice_restart_session_empty"):
                 st.session_state.srs_queue = None
                 st.session_state.card_flipped = False
                 st.session_state.srs_completed = False
@@ -1108,7 +1147,7 @@ if st.session_state.practice_package:
                 if not st.session_state.card_flipped:
                     st.markdown(f"### ❓ {card['front']}")
                     st.caption("Press **Space** or **Enter**, or click below to reveal the answer.")
-                    if st.button("🔄 Press Space or Enter to Flip Card", use_container_width=True):
+                    if st.button("🔄 Press Space or Enter to Flip Card", use_container_width=True, key="practice_flip_card"):
                         st.session_state.card_flipped = True
                         st.rerun()
                 else:
@@ -1163,19 +1202,80 @@ if st.session_state.practice_package:
 
                     for g_idx, label in enumerate(["1 - Again", "2 - Hard", "3 - Good", "4 - Easy"], start=1):
                         with cols[g_idx - 1]:
-                            if st.button(label, use_container_width=True):
+                            if st.button(label, use_container_width=True, key=f"practice_grade_{g_idx}_{card['id']}"):
                                 record(g_idx)
 
     # Term Matching
     with tab_matching:
         pairs = pkg.matching_pairs
-        selected_matches = {}
-        for p in pairs:
-            selected_matches[p.term] = st.selectbox(f"**{p.term}**", ["Select a definition..."] + st.session_state.scrambled_defs, key=f"match_{p.term}")
 
-        if st.button("Check Matches"):
-            correct_count = sum(1 for p in pairs if selected_matches[p.term] == p.definition)
-            if correct_count == len(pairs):
-                st.success(f"🎉 Perfect score! You matched all terms correctly.")
+        if not st.session_state.matching_submitted:
+            if not pairs:
+                st.warning("No matching questions were generated for this topic.")
             else:
-                st.warning(f"You got {correct_count} out of {len(pairs)} correct.")
+                selected_matches = {}
+
+                for index, pair in enumerate(pairs):
+                    selected_matches[index] = st.selectbox(
+                        f"**{index + 1}. {pair.term}**",
+                        ["Select a definition..."] + st.session_state.scrambled_defs,
+                        key=f"matching_answer_{index}",
+                    )
+
+                if st.button("Submit Matching Answers", key="submit_matching"):
+                    st.session_state.matching_answers = selected_matches
+                    st.session_state.matching_submitted = True
+                    st.rerun()
+        else:
+            selected_matches = st.session_state.matching_answers
+            correct_count = 0
+
+            for index, pair in enumerate(pairs):
+                selected_definition = selected_matches.get(index)
+                is_correct = selected_definition == pair.definition
+
+                if is_correct:
+                    correct_count += 1
+
+                st.write(f"**{index + 1}. {pair.term}**")
+
+                if is_correct:
+                    st.markdown(
+                        f'<div style="background:#dcfce7; border:2px solid #15803d; '
+                        f'color:#14532d; border-radius:4px; padding:0.45rem 0.7rem; '
+                        f'margin:0.25rem 0; font-weight:600;">'
+                        f'{escape(pair.definition)} '
+                        f'<small>Correct answer</small></div>',
+                        unsafe_allow_html=True,
+                    )
+                else:
+                    if selected_definition and selected_definition != "Select a definition...":
+                        st.markdown(
+                            f'<div style="background:#fee2e2; border:2px solid #b91c1c; '
+                            f'color:#7f1d1d; border-radius:4px; padding:0.45rem 0.7rem; '
+                            f'margin:0.25rem 0; font-weight:600;">'
+                            f'{escape(selected_definition)} '
+                            f'<small>Your answer</small></div>',
+                            unsafe_allow_html=True,
+                        )
+
+                    st.markdown(
+                        f'<div style="background:#dcfce7; border:2px solid #15803d; '
+                        f'color:#14532d; border-radius:4px; padding:0.45rem 0.7rem; '
+                        f'margin:0.25rem 0; font-weight:600;">'
+                        f'{escape(pair.definition)} '
+                        f'<small>Correct answer</small></div>',
+                        unsafe_allow_html=True,
+                    )
+
+                    explanation = pair.explanation or (
+                        "Review the correct definition and compare it with your selection."
+                    )
+                    st.info(f"**Why this matters:** {explanation}")
+
+            st.success(f"You got {correct_count} of {len(pairs)} matching questions correct.")
+
+            if st.button("Retry Term Matching", key="retry_matching"):
+                st.session_state.matching_submitted = False
+                st.session_state.matching_answers = {}
+                st.rerun()
