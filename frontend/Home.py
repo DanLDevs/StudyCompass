@@ -51,12 +51,18 @@ for course in courses:
 if review_counts["due"] or review_counts["new"]:
     if len(course_review_options) == 1:
         selected_course_id, _, selected_total = course_review_options[0]
-        if st.button(f"Review {selected_total} cards", icon="🎴", use_container_width=True):
+        if st.button(f"Review {selected_total} cards", icon="🎴", use_container_width=True, key="home_review_single_course"):
             st.session_state.launch_review_course_id = selected_course_id
             st.session_state.launch_review_scope = "This Course"
             st.session_state.launch_review_limit = 10
             st.session_state.launch_review_new_limit = 10
             st.session_state.current_course_id = selected_course_id
+            st.session_state.practice_package = None
+            st.session_state.practice_quiz_submitted = False
+            st.session_state.practice_quiz_answers = {}
+            st.session_state.matching_submitted = False
+            st.session_state.matching_answers = {}
+            st.session_state.scrambled_defs = []
             st.switch_page("pages/1_Courses.py")
     else:
         options = [
@@ -69,12 +75,18 @@ if review_counts["due"] or review_counts["new"]:
             for course_id, name, total_ready in course_review_options
             if selected_label == f"{name} ({total_ready} ready)"
         )
-        if st.button("Review selected course", icon="🎴", use_container_width=True):
+        if st.button("Review selected course", icon="🎴", use_container_width=True, key="home_review_selected_course"):
             st.session_state.launch_review_course_id = selected_course_id
             st.session_state.launch_review_scope = "This Course"
             st.session_state.launch_review_limit = 10
             st.session_state.launch_review_new_limit = 10
             st.session_state.current_course_id = selected_course_id
+            st.session_state.practice_package = None
+            st.session_state.practice_quiz_submitted = False
+            st.session_state.practice_quiz_answers = {}
+            st.session_state.matching_submitted = False
+            st.session_state.matching_answers = {}
+            st.session_state.scrambled_defs = []
             st.switch_page("pages/1_Courses.py")
 else:
     st.success("No flashcards are due right now. Your next scheduled cards are still in the future.")

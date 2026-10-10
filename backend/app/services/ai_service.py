@@ -67,13 +67,19 @@ class Flashcard(BaseModel):
 class MatchingPair(BaseModel):
     term: str = Field(description="Term, concept, or question")
     definition: str = Field(description="Definition, explanation, example, or answer")
+    explanation: str | None = Field(
+        default=None,
+        description="Concise explanation of why this definition matches the term.",
+    )
 
 # Practice Drill Response Container
 class TopicPracticePackage(BaseModel):
     topic: str
     multiple_choice: List[Question] = Field(description="8 to 10 targeted multiple choice questions, aiming for 10")
     flashcards: List[Flashcard] = Field(description="4 to 6 key concept flashcards")
-    matching_pairs: List[MatchingPair] = Field(description="4 distinct term-to-definition pairs")
+    matching_pairs: List[MatchingPair] = Field(
+        description="8 to 10 distinct term-to-definition matching pairs with explanations"
+    )
 
 # Retry handling
 def is_transient_error(exception: BaseException) -> bool:
@@ -258,7 +264,9 @@ def generate_practice_package(topic: str, course_text: str, model_name: str = PR
     Generate a complete targeted study package focused strictly on this weak topic:
     1. 10 targeted multiple-choice questions with exactly 4 options each, a correct answer index, and a concise explanation of why the correct answer is right. If the supplied context cannot support 10 distinct questions, return 8 to 9 high-quality questions instead.
     2. 5 flashcards covering important definitions, examples, distinctions, or worked solutions.
-    3. 4 matching pairs linking distinct terms or concepts to concise explanations.
+    3. Generate 8 to 10 matching pairs linking distinct terms or concepts to definitions.
+       Each pair must include a concise explanation of the key idea.
+       If the context cannot support 10 distinct pairs, return 8 or 9 high-quality pairs.
     Keep each question explanation brief and grounded only in the supplied context. For each question, explain the key idea the learner should remember, especially when a distractor reflects a common misconception.
     """
 
@@ -273,6 +281,11 @@ def generate_practice_package(topic: str, course_text: str, model_name: str = PR
         for question in package.multiple_choice[:10]
         if len(question.options) == 4
         and 0 <= question.correct_option_index < len(question.options)
+    ]
+    package.matching_pairs = [
+        pair
+        for pair in package.matching_pairs[:10]
+        if pair.term.strip() and pair.definition.strip()
     ]
     return package
 
