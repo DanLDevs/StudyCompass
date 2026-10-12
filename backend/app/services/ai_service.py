@@ -255,6 +255,8 @@ def generate_assessment_from_text(course_text: str, check_correctness: bool = Fa
     return Assessment.model_validate_json(response.text)
 
 def generate_practice_package(topic: str, course_text: str, model_name: str = PRIMARY_MODEL) -> TopicPracticePackage:
+    # AI assistance was used to help design this prompt and the structured
+    # practice-package workflow; the application validates the returned data below.
     prompt = f"""
     Context:
     \"\"\"{course_text}\"\"\"
@@ -270,12 +272,16 @@ def generate_practice_package(topic: str, course_text: str, model_name: str = PR
     Keep each question explanation brief and grounded only in the supplied context. For each question, explain the key idea the learner should remember, especially when a distractor reflects a common misconception.
     """
 
+    # The language model generates the study content; Pydantic parses it into
+    # the schema before the application uses any questions or matching pairs.
     response = _generate_content_with_fallback(
         model=model_name,
         contents=prompt,
         response_schema=TopicPracticePackage,
     )
     package = TopicPracticePackage.model_validate_json(response.text)
+    # These checks are application-controlled: malformed questions and incomplete
+    # matching pairs are removed instead of being shown directly to the student.
     package.multiple_choice = [
         question
         for question in package.multiple_choice[:10]

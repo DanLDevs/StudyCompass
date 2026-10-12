@@ -54,6 +54,8 @@ st.set_page_config(page_title="StudyCompass | Courses", layout="wide")
 
 
 def render_review_shortcuts():
+    # AI assistance was used to help design this browser-side keyboard shortcut
+    # bridge; it supports Streamlit's rerun-based buttons without changing SRS data.
     components.html(
         r"""
         <script>
@@ -111,7 +113,8 @@ def render_review_shortcuts():
 
 
 def extract_uploaded_text(uploaded_file) -> str:
-    # Extract readable text from a supported study-material file.
+    # AI assistance helped organize the multi-format parsing workflow; the
+    # application uses format-specific libraries to extract the actual text.
     file_type = Path(uploaded_file.name).suffix.lower()
 
     if file_type == ".pdf":
@@ -154,7 +157,8 @@ def extract_uploaded_text(uploaded_file) -> str:
 
 
 def get_topic_context(connection, document_id: int | None, topic: str, fallback_text: str) -> str:
-    # Retrieve the most relevant ordered chunks for a practice topic.
+    # AI assistance helped shape this context-selection strategy; the ranking
+    # and fallback behavior below are deterministic application logic.
     if not document_id:
         return fallback_text
 

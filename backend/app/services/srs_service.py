@@ -28,6 +28,8 @@ def _timestamp(value: datetime | None = None) -> str:
 
 def upsert_flashcards(connection, course_id: int, topic_name: str, cards: Sequence) -> None:
     """Persist generated cards without resetting existing scheduling history."""
+    # AI assistance was used to help design the generated flashcard workflow;
+    # this function stores those cards while preserving each student's review history.
     connection.executemany(
         """
         INSERT INTO flashcards (course_id, topic_name, front, back)
@@ -142,6 +144,8 @@ def calculate_sm2(
     grade: 1 (Again), 2 (Hard), 3 (Good), 4 (Easy)
     Returns: (new_reptitions, new_ease_factor, new_interval, next_due_date)
     """
+    # The AI-generated card content is reviewed by this deterministic scheduling
+    # algorithm; no language-model decision is made when calculating the next due date.
     grade = min(4, max(1, int(grade)))
     repetitions = max(0, int(repetitions))
     interval = max(0, int(interval))
