@@ -75,15 +75,17 @@ Open the URL shown by Streamlit, usually `http://localhost:8501`. Press `Ctrl+C`
 
 For Command Prompt, activate with `.venv\Scripts\activate.bat` and use the same run command.
 
-## Deployment Readiness
+## Deployment
 
-For Streamlit Community Cloud, the exact app entry point is:
+The Streamlit app is deployed and accessible at [studycompass.streamlit.app](https://studycompass.streamlit.app).
+
+The Streamlit Community Cloud app entry point is:
 
 ```text
 frontend/Home.py
 ```
 
-The repository must first be pushed to GitHub. Cloud API-key secret handling still needs to be verified or updated: the current implementation reads `GEMINI_API_KEY` through dotenv and `os.getenv` and does not yet document or implement Streamlit Cloud secrets directly. SQLite data is stored in `study_compass.db`, so it will not be durable across hosted restarts or rebuilds. SQLite files are excluded from Git.
+Cloud API-key secret handling still needs to be verified or updated: the current implementation reads `GEMINI_API_KEY` through dotenv and `os.getenv` and does not yet document or implement Streamlit Cloud secrets directly. SQLite data is stored in `study_compass.db`, so it will not be durable across hosted restarts or rebuilds. SQLite files are excluded from Git.
 
 ## Development and Testing
 
