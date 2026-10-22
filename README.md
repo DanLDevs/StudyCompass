@@ -1,6 +1,16 @@
 # StudyCompass
 
-StudyCompass is a Streamlit study-planning app for organizing courses and exams, measuring topic mastery, and guiding practice with uploaded study materials. The local Streamlit app is configured and runnable. GitHub and Streamlit Community Cloud deployment are not complete.
+StudyCompass is a Streamlit study-planning app for organizing courses and exams, measuring topic mastery, and guiding practice with uploaded study materials. The local Streamlit app is configured and runnable.
+
+## Deployment
+The Streamlit app is deployed and accessible at [studycompass.streamlit.app](https://studycompass.streamlit.app).
+
+The Streamlit Community Cloud app entry point is:
+```text
+frontend/Home.py
+```
+
+Cloud API-key secret handling still needs to be verified or updated: the current implementation reads `GEMINI_API_KEY` through dotenv and `os.getenv` and does not yet document or implement Streamlit Cloud secrets directly. SQLite data is stored in `study_compass.db`, so it will not be durable across hosted restarts or rebuilds. SQLite files are excluded from Git.
 
 ## Current Features
 
@@ -74,18 +84,6 @@ python -m streamlit run frontend/Home.py
 Open the URL shown by Streamlit, usually `http://localhost:8501`. Press `Ctrl+C` in the terminal to stop the app.
 
 For Command Prompt, activate with `.venv\Scripts\activate.bat` and use the same run command.
-
-## Deployment
-
-The Streamlit app is deployed and accessible at [studycompass.streamlit.app](https://studycompass.streamlit.app).
-
-The Streamlit Community Cloud app entry point is:
-
-```text
-frontend/Home.py
-```
-
-Cloud API-key secret handling still needs to be verified or updated: the current implementation reads `GEMINI_API_KEY` through dotenv and `os.getenv` and does not yet document or implement Streamlit Cloud secrets directly. SQLite data is stored in `study_compass.db`, so it will not be durable across hosted restarts or rebuilds. SQLite files are excluded from Git.
 
 ## Development and Testing
 
